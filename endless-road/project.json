@@ -1,35 +1,7 @@
 {
     "title" : "無限山路駕駛",
-    "type"  : "web",          // 指定類型為 Web
-    "file"  : "index.html",   // 指定主 HTML 文件
-    "schemecolor" : "#a0c0f0", // 主題顏色，用於 UI
-    "properties" : {
-        // 在這裡添加用戶可自定義的屬性
-        "drivespeed": {
-            "type": "slider",         // 類型：滑塊
-            "text": "行駛速度",       // 在 UI 中顯示的文字
-            "min": 1.0,               // 最小值
-            "max": 50.0,              // 最大值
-            "step": 0.5,              // 步長
-            "value": 15.0             // 默認值 (與你代碼中的 driveSpeed 初始值一致)
-        },
-         "treedensity": {
-            "type": "slider",
-            "text": "樹木密度 (每段)",
-            "min": 0,
-            "max": 200,
-            "step": 5,
-            "value": 80 // 默認值 (與你代碼中的 treesPerSegment 初始值一致)
-        },
-        "fogdensity": {
-            "type": "slider",
-            "text": "霧濃度 (指數霧)",
-            "min": 0.001,
-            "max": 0.02, // 指數霧的密度值通常較小
-            "step": 0.0005,
-            "value": 0.006, // 需要根據視覺效果調整此默認值
-            "precision": 4 // 小數位精度
-        }
-        // 可以添加更多屬性，例如：相機高度、視野等
-    }
+    "type"  : "web",
+    "file"  : "index.html",
+    "schemecolor" : "#a0c0f0",
+    "preview" : "preview.jpg"
 }

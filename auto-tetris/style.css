@@ -1,0 +1,20 @@
+html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    width: 100%;
+    overflow: hidden; /* 防止滾動條 */
+    background-color: #1a1a2e; /* 深藍紫色背景 (你可以改成你喜歡的) */
+    /* 新增 flex 佈局來居中 canvas 容器 */
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    color: #e0e0e0; /* 預設文字顏色 (主要由 canvas UI 控制) */
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+#tetrisCanvas {
+    /* border: 1px solid #4a4a6a; */ /* 桌布通常不需要邊框 */
+    display: block; /* 確保 canvas 是塊級元素 */
+    /* 背景色由 JS 中的 drawGame() 清除函數控制 */
+}
