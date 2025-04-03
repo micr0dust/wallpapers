@@ -19,6 +19,7 @@
 </head>
 
 <body>
+    <!-- Make sure these paths are correct relative to your HTML file -->
     <script src="three.min.js"></script>
     <script src="simplex-noise.js"></script>
 
@@ -27,13 +28,14 @@
         // ... (保持不變) ...
         let scene, camera, renderer, clock;
         let roadSegments = []; let terrainSegments = []; let pillars = []; let embankmentSegments = [];
-        let guardrailSegments = []; // **新增：護欄網格數組**
-        let treeInstances = [];     // **新增：樹木實例數組**
+        let guardrailSegments = [];
+        let treeInstances = [];
         const segmentLength = 40; const roadWidth = 8; const numSegments = 30;
         const terrainWidth = 600; const terrainDetail = 38;
         let driveSpeed = 15.0; let currentPathDistance = 0;
 
         // --- 噪音生成器 ---
+        // ... (保持不變) ...
         const simplex = new SimplexNoise();
         const baseTerrainHeightFreq = 0.003; const baseTerrainHeightAmp = 60;
         const roadHeightVariationFreq = 0.015; const roadHeightVariationAmp = 8;
@@ -42,17 +44,20 @@
 
 
         // --- 相機參數 ---
+        // ... (保持不變) ...
         const cameraHeight = 3.5; const cameraLookDistance = 45; const cameraFollowSpeed = 0.06;
         const rightLaneOffset = roadWidth * 0.25;
         let targetCameraPosition = new THREE.Vector3(); let targetLookAtPosition = new THREE.Vector3();
 
 
         // --- 高架橋參數 ---
+        // ... (保持不變) ...
         const pillarCheckThreshold = 4.0; const pillarSpacing = 8.0; const pillarRadius = 0.5;
         const pillarMaterial = new THREE.MeshStandardMaterial({ color: 0x888888 });
 
 
         // --- 路基參數 ---
+        // ... (保持不變) ...
         const roadBedOffset = -2.0;
         const roadForceRadius = roadWidth * 0.7;
         const roadBlendRadius = roadWidth * 3.8;
@@ -60,32 +65,41 @@
 
 
         // --- 土堆/路基網格參數 ---
+        // ... (保持不變) ...
         const embankmentMaterial = new THREE.MeshStandardMaterial({ color: 0xc2b280, side: THREE.DoubleSide, flatShading: false });
         const embankmentSideExtendDistance = 8.0;
         let lastSegmentNeededEmbankment = false;
 
         // --- 地形顏色和裙邊 ---
+        // ... (保持不變) ...
         const terrainColor = 0x6a9a6a;
         const terrainSkirtDrop = 30;
 
         // --- 樹木參數 ---
-        const treesPerSegment = 80;          // **每個地形區塊大致生成多少棵樹**
+        // ... (保持不變) ...
+        const treesPerSegment = 80;
         let treeGeometryTrunk, treeGeometryCanopy;
         let treeMaterialTrunk, treeMaterialCanopy;
         const treeScaleMin = 0.8; const treeScaleMax = 1.5;
-        const clusterProbability = 0.35;     // **Probability (0-1) of a cluster appearing in a segment**
-        const numTreesInCluster = 15;        // **Average number of trees per cluster**
-        const clusterRadius = 18;            // **How spread out trees are within a cluster**
-        const flatnessThreshold = 0.6;       // **Max allowed height difference over 1 unit distance for flatness**
-        const treeAvoidRoadRadius = roadWidth * 2.5; // **Increase avoid radius slightly for clusters** // 
+        const clusterProbability = 0.35;
+        const numTreesInCluster = 15;
+        const clusterRadius = 18;
+        const flatnessThreshold = 0.6;
+        const treeAvoidRoadRadius = roadWidth * 2.5;
 
         // --- 護欄參數 ---
+        // ... (保持不變) ...
         const guardrailHeight = 1.0;
         const postRadius = 0.1;
         const railHeight = 0.15;
-        const railSpacing = 0.3; // 橫欄之間的垂直間距
+        const railSpacing = 0.3;
         const guardrailMaterial = new THREE.MeshStandardMaterial({ color: 0xaaaaaa, roughness: 0.6, metalness: 0.4 });
-        const guardrailThreshold = 2.5; // **略低於柱子閾值，更快出現護欄**
+        const guardrailThreshold = 2.5;
+
+        // === 新增：動畫暫停控制 ===
+        let isPaused = false;
+        let animationFrameId = null; // To potentially cancel the frame if needed
+
 
         // --- 輔助函數：Smoothstep --- (不變)
         function smoothstep(edge0, edge1, x) { const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0))); return t * t * (3 - 2 * t); }
@@ -110,15 +124,22 @@
             const terrainMaterial = new THREE.MeshStandardMaterial({ color: terrainColor, flatShading: false, side: THREE.DoubleSide });
 
             // **創建樹木基礎幾何體和材質**
+            // ... (保持不變) ...
             treeGeometryTrunk = new THREE.CylinderGeometry(0.15, 0.2, 1.5, 5); // 簡化樹幹
             treeGeometryCanopy = new THREE.ConeGeometry(0.8, 2.5, 6); // 簡化樹冠
             treeMaterialTrunk = new THREE.MeshLambertMaterial({ color: 0x8B4513 }); // 棕色
             treeMaterialCanopy = new THREE.MeshLambertMaterial({ color: 0x228B22 }); // 森林綠
 
+
             // --- 創建初始 ---
             for (let i = 0; i < numSegments + 5; i++) { addTerrainSegment(i * segmentLength, terrainMaterial); }
             for (let i = 0; i < numSegments; i++) { addRoadSegment(i * segmentLength, roadMaterial, lineMaterial); }
-            window.addEventListener('resize', onWindowResize, false); animate();
+
+            // --- **設置事件監聽器** ---
+            setupVisibilityListeners();
+
+            window.addEventListener('resize', onWindowResize, false);
+            animate(); // Start the animation loop
         }
 
         // --- 計算原始地形估算高度 --- (不變)
@@ -129,6 +150,7 @@
 
         // --- 創建路段、柱子、土堆和護欄 ---
         function addRoadSegment(startDistance, roadMat, lineMat) {
+            // ... (大部分代碼保持不變) ...
             const prevHadEmbankment = lastSegmentNeededEmbankment;
             const segmentDetail = 15; const points = []; const tangents = []; const normals = [];
             const up = new THREE.Vector3(0, 1, 0);
@@ -136,10 +158,10 @@
             for (let i = 0; i <= segmentDetail; i++) { const currentTangent = tangents[i]; let normal = new THREE.Vector3().crossVectors(currentTangent, up).normalize(); if (Math.abs(currentTangent.y) > 0.98) { normal.crossVectors(currentTangent, new THREE.Vector3(1, 0, 0)).normalize(); if (normal.lengthSq() < 0.1) { normal.crossVectors(currentTangent, new THREE.Vector3(0, 0, 1)).normalize(); } } normals.push(normal); }
 
             const roadVertices = []; const lineVertices = []; const embankmentVertices = [];
-            const leftGuardrailVertices = []; // **存儲左護欄頂點**
-            const rightGuardrailVertices = []; // **存儲右護欄頂點**
+            const leftGuardrailVertices = [];
+            const rightGuardrailVertices = [];
             const halfWidth = roadWidth / 2; let distanceAlongSegment = 0; let lastPillarPos = -Infinity;
-            let needsEmbankmentMesh = false; let needsGuardrailMesh = false; // **新增護欄標記**
+            let needsEmbankmentMesh = false; let needsGuardrailMesh = false;
             let first_v1 = null, first_v2 = null, first_eb1 = null, first_eb2 = null;
 
             for (let i = 0; i < segmentDetail; i++) {
@@ -166,7 +188,7 @@
                 const currentPieceNeedsEmbankment = !segmentNeedsPillar && terrainRawY > targetBedLevel + 0.1;
                 if (currentPieceNeedsEmbankment) {
                     needsEmbankmentMesh = true;
-                    // Calculate embankment vertices... (using user's -1.0 adjustment)
+                    // Calculate embankment vertices... (unchanged)
                     const eb1_xz_vec = n1.clone().multiplyScalar(-embankmentSideExtendDistance); const eb2_xz_vec = n1.clone().multiplyScalar(embankmentSideExtendDistance); const eb3_xz_vec = n2.clone().multiplyScalar(embankmentSideExtendDistance); const eb4_xz_vec = n2.clone().multiplyScalar(-embankmentSideExtendDistance);
                     const eb1_x = v1.x + eb1_xz_vec.x; const eb1_z = v1.z + eb1_xz_vec.z; const eb2_x = v2.x + eb2_xz_vec.x; const eb2_z = v2.z + eb2_xz_vec.z; const eb3_x = v3.x + eb3_xz_vec.x; const eb3_z = v3.z + eb3_xz_vec.z; const eb4_x = v4.x + eb4_xz_vec.x; const eb4_z = v4.z + eb4_xz_vec.z;
                     const terrain_eb1_y = getModifiedTerrainHeight(eb1_x, eb1_z); const terrain_eb2_y = getModifiedTerrainHeight(eb2_x, eb2_z); const terrain_eb3_y = getModifiedTerrainHeight(eb3_x, eb3_z); const terrain_eb4_y = getModifiedTerrainHeight(eb4_x, eb4_z);
@@ -176,62 +198,15 @@
                     if (first_v1 === null) { first_v1 = v1.clone(); first_v2 = v2.clone(); first_eb1 = eb1.clone(); first_eb2 = eb2.clone(); }
                 }
 
-                // **Check for Guardrail**
-                // If height difference exceeds threshold AND no embankment is being built here
+                // **Check for Guardrail** (unchanged)
                 if (heightDiff > guardrailThreshold && !currentPieceNeedsEmbankment) {
                     needsGuardrailMesh = true;
-                    const postOffset = 0.1; // Move posts slightly inwards from road edge
-
-                    // --- Left Guardrail ---
-                    const post1_base = v1.clone().add(n1.clone().multiplyScalar(postOffset)); // Rear-left post base
-                    const post4_base = v4.clone().add(n2.clone().multiplyScalar(postOffset)); // Front-left post base
-                    const post1_top = post1_base.clone().add(up.clone().multiplyScalar(guardrailHeight));
-                    const post4_top = post4_base.clone().add(up.clone().multiplyScalar(guardrailHeight));
-
-                    // Add Post 1 (simple quad approximation)
-                    leftGuardrailVertices.push(post1_base.x - postRadius, post1_base.y, post1_base.z, post1_base.x + postRadius, post1_base.y, post1_base.z, post1_top.x - postRadius, post1_top.y, post1_top.z);
-                    leftGuardrailVertices.push(post1_base.x + postRadius, post1_base.y, post1_base.z, post1_top.x + postRadius, post1_top.y, post1_top.z, post1_top.x - postRadius, post1_top.y, post1_top.z);
-                    // Add Rails (simple quads) - Can add multiple rails
-                    const rail1_bl = post1_top.clone().sub(up.clone().multiplyScalar(railHeight)); // Bottom-left of top rail
-                    const rail1_br = post4_top.clone().sub(up.clone().multiplyScalar(railHeight)); // Bottom-right of top rail
-                    leftGuardrailVertices.push(rail1_bl.x, rail1_bl.y, rail1_bl.z, rail1_br.x, rail1_br.y, rail1_br.z, post1_top.x, post1_top.y, post1_top.z);
-                    leftGuardrailVertices.push(rail1_br.x, rail1_br.y, rail1_br.z, post4_top.x, post4_top.y, post4_top.z, post1_top.x, post1_top.y, post1_top.z);
-                    // Add second rail (optional)
-                    const rail2_tl = rail1_bl.clone().sub(up.clone().multiplyScalar(railSpacing));
-                    const rail2_tr = rail1_br.clone().sub(up.clone().multiplyScalar(railSpacing));
-                    const rail2_bl = rail2_tl.clone().sub(up.clone().multiplyScalar(railHeight));
-                    const rail2_br = rail2_tr.clone().sub(up.clone().multiplyScalar(railHeight));
-                    leftGuardrailVertices.push(rail2_bl.x, rail2_bl.y, rail2_bl.z, rail2_br.x, rail2_br.y, rail2_br.z, rail2_tl.x, rail2_tl.y, rail2_tl.z);
-                    leftGuardrailVertices.push(rail2_br.x, rail2_br.y, rail2_br.z, rail2_tr.x, rail2_tr.y, rail2_tr.z, rail2_tl.x, rail2_tl.y, rail2_tl.z);
-
-
-                    // --- Right Guardrail --- (Similar logic)
-                 const post2_base = v2.clone().add(n1.clone().multiplyScalar(-postOffset)); // Rear-right
-                 const post3_base = v3.clone().add(n2.clone().multiplyScalar(-postOffset)); // Front-right
-                 const post2_top = post2_base.clone().add(up.clone().multiplyScalar(guardrailHeight));
-                 const post3_top = post3_base.clone().add(up.clone().multiplyScalar(guardrailHeight));
-
-                  // Add Post 2 (unchanged)
-                 rightGuardrailVertices.push(post2_base.x - postRadius, post2_base.y, post2_base.z, post2_base.x + postRadius, post2_base.y, post2_base.z, post2_top.x - postRadius, post2_top.y, post2_top.z);
-                 rightGuardrailVertices.push(post2_base.x + postRadius, post2_base.y, post2_base.z, post2_top.x + postRadius, post2_top.y, post2_top.z, post2_top.x - postRadius, post2_top.y, post2_top.z);
-
-                 // Add Rails (**REVERSED WINDING ORDER**)
-                 const r_rail1_bl = post2_top.clone().sub(up.clone().multiplyScalar(railHeight));
-                 const r_rail1_br = post3_top.clone().sub(up.clone().multiplyScalar(railHeight));
-                 // Triangle 1: bl, top-rear(p2), br => Swapped 2nd and 3rd
-                 rightGuardrailVertices.push(r_rail1_bl.x, r_rail1_bl.y, r_rail1_bl.z,   post2_top.x, post2_top.y, post2_top.z,   r_rail1_br.x, r_rail1_br.y, r_rail1_br.z);
-                 // Triangle 2: br, top-rear(p2), top-front(p3) => Swapped 2nd and 3rd
-                 rightGuardrailVertices.push(r_rail1_br.x, r_rail1_br.y, r_rail1_br.z,   post2_top.x, post2_top.y, post2_top.z,   post3_top.x, post3_top.y, post3_top.z);
-
-                 // Add second rail (**REVERSED WINDING ORDER**)
-                 const r_rail2_tl = r_rail1_bl.clone().sub(up.clone().multiplyScalar(railSpacing));
-                 const r_rail2_tr = r_rail1_br.clone().sub(up.clone().multiplyScalar(railSpacing));
-                 const r_rail2_bl = r_rail2_tl.clone().sub(up.clone().multiplyScalar(railHeight));
-                 const r_rail2_br = r_rail2_tr.clone().sub(up.clone().multiplyScalar(railHeight));
-                 // Triangle 1: bl, tl, br => Swapped 2nd and 3rd
-                 rightGuardrailVertices.push(r_rail2_bl.x, r_rail2_bl.y, r_rail2_bl.z,   r_rail2_tl.x, r_rail2_tl.y, r_rail2_tl.z,   r_rail2_br.x, r_rail2_br.y, r_rail2_br.z);
-                 // Triangle 2: br, tl, tr => Swapped 2nd and 3rd
-                 rightGuardrailVertices.push(r_rail2_br.x, r_rail2_br.y, r_rail2_br.z,   r_rail2_tl.x, r_rail2_tl.y, r_rail2_tl.z,   r_rail2_tr.x, r_rail2_tr.y, r_rail2_tr.z);
+                    const postOffset = 0.1;
+                    // --- Left Guardrail --- (unchanged)
+                    const post1_base = v1.clone().add(n1.clone().multiplyScalar(postOffset)); const post4_base = v4.clone().add(n2.clone().multiplyScalar(postOffset)); const post1_top = post1_base.clone().add(up.clone().multiplyScalar(guardrailHeight)); const post4_top = post4_base.clone().add(up.clone().multiplyScalar(guardrailHeight));
+                    leftGuardrailVertices.push(post1_base.x - postRadius, post1_base.y, post1_base.z, post1_base.x + postRadius, post1_base.y, post1_base.z, post1_top.x - postRadius, post1_top.y, post1_top.z); leftGuardrailVertices.push(post1_base.x + postRadius, post1_base.y, post1_base.z, post1_top.x + postRadius, post1_top.y, post1_top.z, post1_top.x - postRadius, post1_top.y, post1_top.z); const rail1_bl = post1_top.clone().sub(up.clone().multiplyScalar(railHeight)); const rail1_br = post4_top.clone().sub(up.clone().multiplyScalar(railHeight)); leftGuardrailVertices.push(rail1_bl.x, rail1_bl.y, rail1_bl.z, rail1_br.x, rail1_br.y, rail1_br.z, post1_top.x, post1_top.y, post1_top.z); leftGuardrailVertices.push(rail1_br.x, rail1_br.y, rail1_br.z, post4_top.x, post4_top.y, post4_top.z, post1_top.x, post1_top.y, post1_top.z); const rail2_tl = rail1_bl.clone().sub(up.clone().multiplyScalar(railSpacing)); const rail2_tr = rail1_br.clone().sub(up.clone().multiplyScalar(railSpacing)); const rail2_bl = rail2_tl.clone().sub(up.clone().multiplyScalar(railHeight)); const rail2_br = rail2_tr.clone().sub(up.clone().multiplyScalar(railHeight)); leftGuardrailVertices.push(rail2_bl.x, rail2_bl.y, rail2_bl.z, rail2_br.x, rail2_br.y, rail2_br.z, rail2_tl.x, rail2_tl.y, rail2_tl.z); leftGuardrailVertices.push(rail2_br.x, rail2_br.y, rail2_br.z, rail2_tr.x, rail2_tr.y, rail2_tr.z, rail2_tl.x, rail2_tl.y, rail2_tl.z);
+                    // --- Right Guardrail --- (unchanged)
+                    const post2_base = v2.clone().add(n1.clone().multiplyScalar(-postOffset)); const post3_base = v3.clone().add(n2.clone().multiplyScalar(-postOffset)); const post2_top = post2_base.clone().add(up.clone().multiplyScalar(guardrailHeight)); const post3_top = post3_base.clone().add(up.clone().multiplyScalar(guardrailHeight)); rightGuardrailVertices.push(post2_base.x - postRadius, post2_base.y, post2_base.z, post2_base.x + postRadius, post2_base.y, post2_base.z, post2_top.x - postRadius, post2_top.y, post2_top.z); rightGuardrailVertices.push(post2_base.x + postRadius, post2_base.y, post2_base.z, post2_top.x + postRadius, post2_top.y, post2_top.z, post2_top.x - postRadius, post2_top.y, post2_top.z); const r_rail1_bl = post2_top.clone().sub(up.clone().multiplyScalar(railHeight)); const r_rail1_br = post3_top.clone().sub(up.clone().multiplyScalar(railHeight)); rightGuardrailVertices.push(r_rail1_bl.x, r_rail1_bl.y, r_rail1_bl.z, post2_top.x, post2_top.y, post2_top.z, r_rail1_br.x, r_rail1_br.y, r_rail1_br.z); rightGuardrailVertices.push(r_rail1_br.x, r_rail1_br.y, r_rail1_br.z, post2_top.x, post2_top.y, post2_top.z, post3_top.x, post3_top.y, post3_top.z); const r_rail2_tl = r_rail1_bl.clone().sub(up.clone().multiplyScalar(railSpacing)); const r_rail2_tr = r_rail1_br.clone().sub(up.clone().multiplyScalar(railSpacing)); const r_rail2_bl = r_rail2_tl.clone().sub(up.clone().multiplyScalar(railHeight)); const r_rail2_br = r_rail2_tr.clone().sub(up.clone().multiplyScalar(railHeight)); rightGuardrailVertices.push(r_rail2_bl.x, r_rail2_bl.y, r_rail2_bl.z, r_rail2_tl.x, r_rail2_tl.y, r_rail2_tl.z, r_rail2_br.x, r_rail2_br.y, r_rail2_br.z); rightGuardrailVertices.push(r_rail2_br.x, r_rail2_br.y, r_rail2_br.z, r_rail2_tl.x, r_rail2_tl.y, r_rail2_tl.z, r_rail2_tr.x, r_rail2_tr.y, r_rail2_tr.z);
                 }
 
                 distanceAlongSegment += segmentPartLength;
@@ -246,108 +221,41 @@
 
             // --- Create Embankment Mesh (with start slope if needed) --- (unchanged)
             if (needsEmbankmentMesh && embankmentVertices.length > 0) {
-                if (!prevHadEmbankment && first_v1 !== null) {
-                    embankmentVertices.push(first_v1.x, first_v1.y, first_v1.z, first_eb1.x, first_eb1.y, first_eb1.z, first_eb2.x, first_eb2.y, first_eb2.z);
-                    embankmentVertices.push(first_v1.x, first_v1.y, first_v1.z, first_eb2.x, first_eb2.y, first_eb2.z, first_v2.x, first_v2.y, first_v2.z);
-                }
-                const embankmentGeometry = new THREE.BufferGeometry();
-                embankmentGeometry.setAttribute('position', new THREE.Float32BufferAttribute(embankmentVertices, 3));
-                embankmentGeometry.computeVertexNormals();
-                const embankmentMesh = new THREE.Mesh(embankmentGeometry, embankmentMaterial);
-                embankmentMesh.userData = { type: 'embankment', distance: startDistance };
-                scene.add(embankmentMesh); embankmentSegments.push(embankmentMesh);
+                if (!prevHadEmbankment && first_v1 !== null) { embankmentVertices.push(first_v1.x, first_v1.y, first_v1.z, first_eb1.x, first_eb1.y, first_eb1.z, first_eb2.x, first_eb2.y, first_eb2.z); embankmentVertices.push(first_v1.x, first_v1.y, first_v1.z, first_eb2.x, first_eb2.y, first_eb2.z, first_v2.x, first_v2.y, first_v2.z); }
+                const embankmentGeometry = new THREE.BufferGeometry(); embankmentGeometry.setAttribute('position', new THREE.Float32BufferAttribute(embankmentVertices, 3)); embankmentGeometry.computeVertexNormals(); const embankmentMesh = new THREE.Mesh(embankmentGeometry, embankmentMaterial); embankmentMesh.userData = { type: 'embankment', distance: startDistance }; scene.add(embankmentMesh); embankmentSegments.push(embankmentMesh);
             }
 
-            // --- **Create Guardrail Meshes** ---
+            // --- **Create Guardrail Meshes** --- (unchanged)
             if (needsGuardrailMesh) {
-                if (leftGuardrailVertices.length > 0) {
-                    const leftGuardrailGeom = new THREE.BufferGeometry();
-                    leftGuardrailGeom.setAttribute('position', new THREE.Float32BufferAttribute(leftGuardrailVertices, 3));
-                    leftGuardrailGeom.computeVertexNormals();
-                    const leftGuardrailMesh = new THREE.Mesh(leftGuardrailGeom, guardrailMaterial);
-                    leftGuardrailMesh.userData = { type: 'guardrail', distance: startDistance };
-                    scene.add(leftGuardrailMesh); guardrailSegments.push(leftGuardrailMesh);
-                }
-                if (rightGuardrailVertices.length > 0) {
-                    const rightGuardrailGeom = new THREE.BufferGeometry();
-                    rightGuardrailGeom.setAttribute('position', new THREE.Float32BufferAttribute(rightGuardrailVertices, 3));
-                    rightGuardrailGeom.computeVertexNormals();
-                    const rightGuardrailMesh = new THREE.Mesh(rightGuardrailGeom, guardrailMaterial);
-                    rightGuardrailMesh.userData = { type: 'guardrail', distance: startDistance };
-                    scene.add(rightGuardrailMesh); guardrailSegments.push(rightGuardrailMesh);
-                }
+                if (leftGuardrailVertices.length > 0) { const leftGuardrailGeom = new THREE.BufferGeometry(); leftGuardrailGeom.setAttribute('position', new THREE.Float32BufferAttribute(leftGuardrailVertices, 3)); leftGuardrailGeom.computeVertexNormals(); const leftGuardrailMesh = new THREE.Mesh(leftGuardrailGeom, guardrailMaterial); leftGuardrailMesh.userData = { type: 'guardrail', distance: startDistance }; scene.add(leftGuardrailMesh); guardrailSegments.push(leftGuardrailMesh); }
+                if (rightGuardrailVertices.length > 0) { const rightGuardrailGeom = new THREE.BufferGeometry(); rightGuardrailGeom.setAttribute('position', new THREE.Float32BufferAttribute(rightGuardrailVertices, 3)); rightGuardrailGeom.computeVertexNormals(); const rightGuardrailMesh = new THREE.Mesh(rightGuardrailGeom, guardrailMaterial); rightGuardrailMesh.userData = { type: 'guardrail', distance: startDistance }; scene.add(rightGuardrailMesh); guardrailSegments.push(rightGuardrailMesh); }
             }
 
             lastSegmentNeededEmbankment = needsEmbankmentMesh; // Update global state
         }
 
+
         // --- 添加柱子 --- (不變)
         function addPillar(roadCenterPos, roadY, terrainRawY, segmentStartDistance) { const height = roadY - terrainRawY; if (height <= 0.1) return; const pillarBottomY = terrainRawY; const pillarTopY = roadY - 0.1; const actualHeight = pillarTopY - pillarBottomY; if (actualHeight <= 0.1) return; const pillarGeometry = new THREE.CylinderGeometry(pillarRadius, pillarRadius, actualHeight, 8); const pillar = new THREE.Mesh(pillarGeometry, pillarMaterial); pillar.position.set(roadCenterPos.x, pillarBottomY + actualHeight / 2, roadCenterPos.z); pillar.userData = { type: 'pillar', distance: segmentStartDistance }; scene.add(pillar); pillars.push(pillar); }
 
-// --- 創建帶裙邊的地形和樹木 (叢生、平地) ---
-function addTerrainSegment(startDistance, terrainMat) {
+        // --- 創建帶裙邊的地形和樹木 (叢生、平地) ---
+        function addTerrainSegment(startDistance, terrainMat) {
+            // ... (大部分代碼保持不變) ...
             const planeDetailX = terrainDetail; const planeDetailY = Math.max(1, Math.floor(segmentLength / 5));
             const terrainGeometry = new THREE.PlaneGeometry(terrainWidth, segmentLength, planeDetailX, planeDetailY);
             const vertices = terrainGeometry.attributes.position; const vertexCount = vertices.count;
             const worldPositions = new Float32Array(vertexCount * 3);
             const centerPathPoint = getPathPoint(startDistance + segmentLength / 2); const tolerance = 0.01;
 
-            // --- 樹木實例數據 ---
             const treeMatrices = [];
-            const dummy = new THREE.Object3D(); // Use a single dummy object
+            const dummy = new THREE.Object3D();
 
-            // 1. 計算地形頂點 (先計算所有頂點的最終高度)
-            for (let i = 0; i < vertexCount; i++) {
-                 const localX = vertices.getX(i); const localY = vertices.getY(i);
-                 const worldZ = centerPathPoint.position.z - localY;
-                 const worldX = centerPathPoint.position.x + localX;
-                 const finalY = getModifiedTerrainHeight(worldX, worldZ); // Get final height after road modification
-                 worldPositions[i * 3] = worldX; worldPositions[i * 3 + 1] = finalY; worldPositions[i * 3 + 2] = worldZ;
-            }
+            // 1. 計算地形頂點 (不變)
+            for (let i = 0; i < vertexCount; i++) { const localX = vertices.getX(i); const localY = vertices.getY(i); const worldZ = centerPathPoint.position.z - localY; const worldX = centerPathPoint.position.x + localX; const finalY = getModifiedTerrainHeight(worldX, worldZ); worldPositions[i * 3] = worldX; worldPositions[i * 3 + 1] = finalY; worldPositions[i * 3 + 2] = worldZ; }
 
-            // 2. **嘗試生成樹木叢集**
-
-            // Pick a random potential cluster center within the segment's XZ bounds
-            const clusterLocalX = Math.random() * terrainWidth - terrainWidth / 2;
-            const clusterLocalY = Math.random() * segmentLength - segmentLength / 2; // Use local Y for Z offset
-            const clusterWorldX = centerPathPoint.position.x + clusterLocalX;
-            const clusterWorldZ = centerPathPoint.position.z - clusterLocalY;
-
-            // Check distance from road
-            const roadPathDataCenter = getPathPoint(-clusterWorldZ);
-            const roadCenterX = roadPathDataCenter.position.x;
-            const distToRoadCenter = Math.abs(clusterWorldX - roadCenterX);
-
-            if (distToRoadCenter > treeAvoidRoadRadius) {
-                // Check flatness using *original* terrain height
-                const hCenter = getEstimatedTerrainHeight(clusterWorldX, clusterWorldZ);
-                const hOffsetX = getEstimatedTerrainHeight(clusterWorldX + 1.0, clusterWorldZ); // Check 1 unit offset in X
-                const hOffsetZ = getEstimatedTerrainHeight(clusterWorldX, clusterWorldZ + 1.0); // Check 1 unit offset in Z
-
-                if (Math.abs(hCenter - hOffsetX) < flatnessThreshold && Math.abs(hCenter - hOffsetZ) < flatnessThreshold) {
-                    // Area is flat enough, plant the cluster
-                    const actualTrees = Math.round(numTreesInCluster * (0.75 + Math.random() * 0.5)); // Slight variation
-                    for (let j = 0; j < actualTrees; j++) {
-                        // Random offset within the cluster radius
-                        const angle = Math.random() * Math.PI * 2;
-                        const radius = Math.random() * clusterRadius;
-                        const treeX = clusterWorldX + Math.cos(angle) * radius;
-                        const treeZ = clusterWorldZ + Math.sin(angle) * radius;
-
-                        // Get the *modified* terrain height at the final tree position
-                        const treeY = getModifiedTerrainHeight(treeX, treeZ);
-
-                        // Create instance matrix
-                        dummy.position.set(treeX, treeY, treeZ);
-                        dummy.rotation.y = Math.random() * Math.PI * 2;
-                        const scale = THREE.MathUtils.randFloat(treeScaleMin, treeScaleMax);
-                        dummy.scale.set(scale, scale, scale);
-                        dummy.updateMatrix();
-                        treeMatrices.push(dummy.matrix.clone());
-                    }
-                }
-            }
-
+            // 2. **嘗試生成樹木叢集** (不變)
+            const clusterLocalX = Math.random() * terrainWidth - terrainWidth / 2; const clusterLocalY = Math.random() * segmentLength - segmentLength / 2; const clusterWorldX = centerPathPoint.position.x + clusterLocalX; const clusterWorldZ = centerPathPoint.position.z - clusterLocalY; const roadPathDataCenter = getPathPoint(-clusterWorldZ); const roadCenterX = roadPathDataCenter.position.x; const distToRoadCenter = Math.abs(clusterWorldX - roadCenterX);
+            if (distToRoadCenter > treeAvoidRoadRadius) { const hCenter = getEstimatedTerrainHeight(clusterWorldX, clusterWorldZ); const hOffsetX = getEstimatedTerrainHeight(clusterWorldX + 1.0, clusterWorldZ); const hOffsetZ = getEstimatedTerrainHeight(clusterWorldX, clusterWorldZ + 1.0); if (Math.abs(hCenter - hOffsetX) < flatnessThreshold && Math.abs(hCenter - hOffsetZ) < flatnessThreshold) { const actualTrees = Math.round(numTreesInCluster * (0.75 + Math.random() * 0.5)); for (let j = 0; j < actualTrees; j++) { const angle = Math.random() * Math.PI * 2; const radius = Math.random() * clusterRadius; const treeX = clusterWorldX + Math.cos(angle) * radius; const treeZ = clusterWorldZ + Math.sin(angle) * radius; const treeY = getModifiedTerrainHeight(treeX, treeZ); dummy.position.set(treeX, treeY, treeZ); dummy.rotation.y = Math.random() * Math.PI * 2; const scale = THREE.MathUtils.randFloat(treeScaleMin, treeScaleMax); dummy.scale.set(scale, scale, scale); dummy.updateMatrix(); treeMatrices.push(dummy.matrix.clone()); } } }
 
             // 3. 修改邊界頂點創建裙邊 (不變)
             for (let i = 0; i < vertexCount; i++) { const localX = vertices.getX(i); const localY = vertices.getY(i); const isBoundary = Math.abs(localX - (-terrainWidth / 2)) < tolerance || Math.abs(localX - (terrainWidth / 2)) < tolerance || Math.abs(localY - (-segmentLength / 2)) < tolerance || Math.abs(localY - (segmentLength / 2)) < tolerance; if (isBoundary) { worldPositions[i * 3 + 1] -= terrainSkirtDrop; } }
@@ -356,64 +264,146 @@ function addTerrainSegment(startDistance, terrainMat) {
             const finalTerrainGeo = new THREE.BufferGeometry(); finalTerrainGeo.setAttribute('position', new THREE.Float32BufferAttribute(worldPositions, 3)); finalTerrainGeo.setIndex(terrainGeometry.index); finalTerrainGeo.computeVertexNormals(); const finalTerrainMesh = new THREE.Mesh(finalTerrainGeo, terrainMat); finalTerrainMesh.userData = { type: 'terrain', distance: startDistance }; scene.add(finalTerrainMesh); terrainSegments.push(finalTerrainMesh);
 
             // 5. **創建樹木 InstancedMesh (如果生成了樹)** (不變)
-            if (treeMatrices.length > 0) {
-                const treeCount = treeMatrices.length;
-                const instancedTrunk = new THREE.InstancedMesh(treeGeometryTrunk, treeMaterialTrunk, treeCount);
-                const instancedCanopy = new THREE.InstancedMesh(treeGeometryCanopy, treeMaterialCanopy, treeCount);
-                const canopyOffset = 1.3; // Adjust as needed
+            if (treeMatrices.length > 0) { const treeCount = treeMatrices.length; const instancedTrunk = new THREE.InstancedMesh(treeGeometryTrunk, treeMaterialTrunk, treeCount); const instancedCanopy = new THREE.InstancedMesh(treeGeometryCanopy, treeMaterialCanopy, treeCount); const canopyOffset = 1.3; for (let i = 0; i < treeCount; i++) { const trunkMatrix = treeMatrices[i]; const canopyMatrix = trunkMatrix.clone(); const position = new THREE.Vector3(); const quaternion = new THREE.Quaternion(); const scale = new THREE.Vector3(); trunkMatrix.decompose(position, quaternion, scale); position.y += canopyOffset * scale.y; canopyMatrix.compose(position, quaternion, scale); instancedTrunk.setMatrixAt(i, trunkMatrix); instancedCanopy.setMatrixAt(i, canopyMatrix); } instancedTrunk.instanceMatrix.needsUpdate = true; instancedCanopy.instanceMatrix.needsUpdate = true; instancedTrunk.userData = { type: 'trees', distance: startDistance }; instancedCanopy.userData = { type: 'trees', distance: startDistance }; scene.add(instancedTrunk); scene.add(instancedCanopy); treeInstances.push(instancedTrunk); treeInstances.push(instancedCanopy); }
+        }
 
-                for (let i = 0; i < treeCount; i++) {
-                    const trunkMatrix = treeMatrices[i];
-                    const canopyMatrix = trunkMatrix.clone();
-                    // Apply offset to canopy matrix without changing scale/rotation easily
-                    const position = new THREE.Vector3();
-                    const quaternion = new THREE.Quaternion();
-                    const scale = new THREE.Vector3();
-                    trunkMatrix.decompose(position, quaternion, scale); // Get components
-                    position.y += canopyOffset * scale.y; // Apply offset considering scale
-                    canopyMatrix.compose(position, quaternion, scale); // Recompose
-
-                    instancedTrunk.setMatrixAt(i, trunkMatrix);
-                    instancedCanopy.setMatrixAt(i, canopyMatrix);
-                }
-                instancedTrunk.instanceMatrix.needsUpdate = true;
-                instancedCanopy.instanceMatrix.needsUpdate = true;
-
-                instancedTrunk.userData = { type: 'trees', distance: startDistance };
-                instancedCanopy.userData = { type: 'trees', distance: startDistance };
-                scene.add(instancedTrunk); scene.add(instancedCanopy);
-                treeInstances.push(instancedTrunk); treeInstances.push(instancedCanopy);
+        // === 新增：動畫暫停/恢復函數 ===
+        function pauseAnimation() {
+            if (!isPaused) {
+                console.log("Animation Paused");
+                isPaused = true;
+                // clock.stop(); // Stop the clock to prevent large deltaTime jump
+                // We might not need to cancel the frame if animate() checks isPaused first
+                // if (animationFrameId) cancelAnimationFrame(animationFrameId);
+                // animationFrameId = null;
             }
         }
-        // --- 動畫循環 --- (不變)
-        function animate() {
-            requestAnimationFrame(animate);
-            const deltaTime = clock.getDelta();
-            currentPathDistance += driveSpeed * deltaTime;
-            const cameraPathData = getPathPoint(currentPathDistance);
-            const camPos = cameraPathData.position;
-            const camTangent = cameraPathData.tangent;
-            const up = new THREE.Vector3(0, 1, 0);
-            const rightNormal = new THREE.Vector3().crossVectors(camTangent, up).normalize();
-            const targetPos = camPos.clone().add(up.multiplyScalar(cameraHeight)).add(rightNormal.multiplyScalar(rightLaneOffset));
-            const lookAtPos = camPos.clone().add(camTangent.multiplyScalar(cameraLookDistance));
-            camera.position.lerp(targetPos, cameraFollowSpeed);
-            targetLookAtPosition.lerp(lookAtPos, cameraFollowSpeed);
-            camera.lookAt(targetLookAtPosition);
-            // --- 管理 ---
-            const recycleThreshold = 80; const generateThreshold = (numSegments - 4) * segmentLength;
-            // **回收樹木**
-            const treesToRemove = []; treeInstances.forEach((t, i) => { if ((-t.userData.distance - segmentLength) > camera.position.z + recycleThreshold) { treesToRemove.push(i); scene.remove(t); t.dispose(); } }); for (let i = treesToRemove.length - 1; i >= 0; i--) treeInstances.splice(treesToRemove[i], 1);
-            // **回收護欄**
-            const guardrailsToRemove = []; guardrailSegments.forEach((g, i) => { if ((-g.userData.distance - segmentLength) > camera.position.z + recycleThreshold) { guardrailsToRemove.push(i); scene.remove(g); if (g.geometry) g.geometry.dispose(); } }); for (let i = guardrailsToRemove.length - 1; i >= 0; i--) guardrailSegments.splice(guardrailsToRemove[i], 1);
-            // ...(其他回收邏輯不變)...
-            const embankmentToRemove = []; embankmentSegments.forEach((e, i) => { if ((-e.userData.distance - segmentLength) > camera.position.z + recycleThreshold) { embankmentToRemove.push(i); scene.remove(e); if (e.geometry) e.geometry.dispose(); } }); for (let i = embankmentToRemove.length - 1; i >= 0; i--) embankmentSegments.splice(embankmentToRemove[i], 1); const segmentsToRemove = []; roadSegments.forEach((s, i) => { if ((-s.userData.distance - segmentLength) > camera.position.z + recycleThreshold) { segmentsToRemove.push(i); scene.remove(s); if (s.geometry) s.geometry.dispose(); } }); for (let i = segmentsToRemove.length - 1; i >= 0; i--) roadSegments.splice(segmentsToRemove[i], 1); const terrainToRemove = []; terrainSegments.forEach((s, i) => { if ((-s.userData.distance - segmentLength) > camera.position.z + recycleThreshold) { terrainToRemove.push(i); scene.remove(s); if (s.geometry) s.geometry.dispose(); } }); for (let i = terrainToRemove.length - 1; i >= 0; i--) terrainSegments.splice(terrainToRemove[i], 1); const pillarsToRemove = []; pillars.forEach((p, i) => { if (p.position.z > camera.position.z + recycleThreshold + segmentLength) { pillarsToRemove.push(i); scene.remove(p); if (p.geometry) p.geometry.dispose(); } }); for (let i = pillarsToRemove.length - 1; i >= 0; i--) pillars.splice(pillarsToRemove[i], 1); let maxDistance = 0; roadSegments.forEach(s => maxDistance = Math.max(maxDistance, s.userData.distance)); let maxTerrainDistance = 0; terrainSegments.forEach(s => maxTerrainDistance = Math.max(maxTerrainDistance, s.userData.distance)); const furthestPointRequired = currentPathDistance + generateThreshold; while (maxTerrainDistance < furthestPointRequired + segmentLength * 3) { const nextTerrainStart = maxTerrainDistance + segmentLength; if (terrainSegments.length > 0) { addTerrainSegment(nextTerrainStart, terrainSegments[0].material); maxTerrainDistance = nextTerrainStart; } else if (terrainMaterial) { addTerrainSegment(nextTerrainStart, terrainMaterial); maxTerrainDistance = nextTerrainStart; } else { break; } } while (maxDistance < furthestPointRequired) { const nextSegmentStart = maxDistance + segmentLength; if (roadSegments.length > 1) { addRoadSegment(nextSegmentStart, roadSegments[0].material, roadSegments[1].material); maxDistance = nextSegmentStart; } else if (roadMaterial && lineMaterial) { addRoadSegment(nextSegmentStart, roadMaterial, lineMaterial); maxDistance = nextSegmentStart; } else { break; } }
-            renderer.render(scene, camera);
+
+        function resumeAnimation() {
+            if (isPaused) {
+                console.log("Animation Resumed");
+                isPaused = false;
+                // clock.start(); // Restart the clock
+                 clock.getDelta(); // **Important:** Call getDelta once to reset the internal timer after pause
+                // Request the next frame if the loop wasn't running
+                // if (!animationFrameId) {
+                //     animate();
+                // }
+                 // The animate loop should restart itself because requestAnimationFrame is at the top
+            }
         }
 
-        function onWindowResize() { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); }
+        // === 新增：設置可見性/焦點監聽器 ===
+        function setupVisibilityListeners() {
+            // --- Standard Browser Visibility API ---
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden) {
+                    pauseAnimation();
+                } else {
+                    resumeAnimation();
+                }
+            });
 
-        init();
+            // --- Focus / Blur Events (Optional but can help) ---
+             window.addEventListener('blur', pauseAnimation);
+             window.addEventListener('focus', resumeAnimation);
+
+
+            // --- Wallpaper Engine Visibility ---
+            // Check if the Wallpaper Engine API is available
+            if (window.wallpaperPropertyListener) {
+                window.wallpaperPropertyListener.applyUserProperties = function(properties) {
+                    if (properties.visibility) {
+                        // WE provides a 'visibility' property
+                         if (!properties.visibility.value) { // Check if the value is false (hidden)
+                            pauseAnimation();
+                        } else {
+                            resumeAnimation();
+                        }
+                    }
+                     // You might also listen for pause/play events if your WE settings allow it
+                     if (properties.pause) { // Hypothetical 'pause' property
+                         if (properties.pause.value) {
+                             pauseAnimation();
+                         } else {
+                             resumeAnimation();
+                         }
+                     }
+                };
+            }
+        }
+
+
+        // --- 動畫循環 (修改) ---
+        function animate() {
+            // Request the next frame **before** doing work.
+            // This ensures the loop continues even if paused.
+            animationFrameId = requestAnimationFrame(animate);
+
+            // **If paused, skip all updates and rendering**
+            if (isPaused) {
+                return;
+            }
+
+            // --- Proceed with animation if not paused ---
+            const deltaTime = clock.getDelta(); // Get time since last *rendered* frame
+
+            // **Only update game state if time has actually passed**
+            // (Helps avoid issues if deltaTime is zero right after resuming)
+            if (deltaTime > 0) {
+                currentPathDistance += driveSpeed * deltaTime;
+
+                const cameraPathData = getPathPoint(currentPathDistance);
+                const camPos = cameraPathData.position;
+                const camTangent = cameraPathData.tangent;
+                const up = new THREE.Vector3(0, 1, 0);
+                const rightNormal = new THREE.Vector3().crossVectors(camTangent, up).normalize();
+                const targetPos = camPos.clone().add(up.multiplyScalar(cameraHeight)).add(rightNormal.multiplyScalar(rightLaneOffset));
+                const lookAtPos = camPos.clone().add(camTangent.multiplyScalar(cameraLookDistance));
+
+                camera.position.lerp(targetPos, cameraFollowSpeed);
+                targetLookAtPosition.lerp(lookAtPos, cameraFollowSpeed);
+                camera.lookAt(targetLookAtPosition);
+
+                // --- 管理 (回收與生成) ---
+                const recycleThreshold = 80; const generateThreshold = (numSegments - 4) * segmentLength;
+                // **回收樹木**
+                const treesToRemove = []; treeInstances.forEach((t, i) => { if ((-t.userData.distance - segmentLength) > camera.position.z + recycleThreshold) { treesToRemove.push(i); scene.remove(t); t.geometry.dispose(); if(t.material) t.material.dispose(); } }); for (let i = treesToRemove.length - 1; i >= 0; i--) treeInstances.splice(treesToRemove[i], 1);
+                // **回收護欄**
+                const guardrailsToRemove = []; guardrailSegments.forEach((g, i) => { if ((-g.userData.distance - segmentLength) > camera.position.z + recycleThreshold) { guardrailsToRemove.push(i); scene.remove(g); if (g.geometry) g.geometry.dispose(); } }); for (let i = guardrailsToRemove.length - 1; i >= 0; i--) guardrailSegments.splice(guardrailsToRemove[i], 1);
+                // ...(其他回收邏輯不變)...
+                const embankmentToRemove = []; embankmentSegments.forEach((e, i) => { if ((-e.userData.distance - segmentLength) > camera.position.z + recycleThreshold) { embankmentToRemove.push(i); scene.remove(e); if (e.geometry) e.geometry.dispose(); } }); for (let i = embankmentToRemove.length - 1; i >= 0; i--) embankmentSegments.splice(embankmentToRemove[i], 1); const segmentsToRemove = []; roadSegments.forEach((s, i) => { if ((-s.userData.distance - segmentLength) > camera.position.z + recycleThreshold) { segmentsToRemove.push(i); scene.remove(s); if (s.geometry) s.geometry.dispose(); } }); for (let i = segmentsToRemove.length - 1; i >= 0; i--) roadSegments.splice(segmentsToRemove[i], 1); const terrainToRemove = []; terrainSegments.forEach((s, i) => { if ((-s.userData.distance - segmentLength) > camera.position.z + recycleThreshold) { terrainToRemove.push(i); scene.remove(s); if (s.geometry) s.geometry.dispose(); } }); for (let i = terrainToRemove.length - 1; i >= 0; i--) terrainSegments.splice(terrainToRemove[i], 1); const pillarsToRemove = []; pillars.forEach((p, i) => { if (p.position.z > camera.position.z + recycleThreshold + segmentLength) { pillarsToRemove.push(i); scene.remove(p); if (p.geometry) p.geometry.dispose(); } }); for (let i = pillarsToRemove.length - 1; i >= 0; i--) pillars.splice(pillarsToRemove[i], 1); let maxDistance = 0; roadSegments.forEach(s => maxDistance = Math.max(maxDistance, s.userData.distance)); let maxTerrainDistance = 0; terrainSegments.forEach(s => maxTerrainDistance = Math.max(maxTerrainDistance, s.userData.distance)); const furthestPointRequired = currentPathDistance + generateThreshold; while (maxTerrainDistance < furthestPointRequired + segmentLength * 3) { const nextTerrainStart = maxTerrainDistance + segmentLength; if (terrainSegments.length > 0 && terrainSegments[0].material) { addTerrainSegment(nextTerrainStart, terrainSegments[0].material); maxTerrainDistance = nextTerrainStart; } else if (scene.getObjectByName("terrainMaterialPlaceholder")) { /* Handle case where initial material needed */ addTerrainSegment(nextTerrainStart, scene.getObjectByName("terrainMaterialPlaceholder").material); maxTerrainDistance = nextTerrainStart; } else { /* Fallback or break if no material found */ console.warn("Cannot find terrain material to add new segment."); break; } } while (maxDistance < furthestPointRequired) { const nextSegmentStart = maxDistance + segmentLength; if (roadSegments.length > 1 && roadSegments[0].material && roadSegments[1].material) { addRoadSegment(nextSegmentStart, roadSegments[0].material, roadSegments[1].material); maxDistance = nextSegmentStart; } else if (scene.getObjectByName("roadMaterialPlaceholder") && scene.getObjectByName("lineMaterialPlaceholder")) { /* Handle case where initial materials needed */ addRoadSegment(nextSegmentStart, scene.getObjectByName("roadMaterialPlaceholder").material, scene.getObjectByName("lineMaterialPlaceholder").material); maxDistance = nextSegmentStart; } else { /* Fallback or break */ console.warn("Cannot find road/line materials to add new segment."); break; } }
+
+                 // **Ensure materials are disposed correctly during cleanup**
+                // (Added dispose calls in the recycle loops above)
+
+            } // End of deltaTime > 0 check
+
+            // --- Render the scene ---
+             if (renderer && scene && camera) { // Add check for safety
+                 renderer.render(scene, camera);
+             }
+
+        } // End animate()
+
+        // --- 窗口大小調整 --- (不變)
+        function onWindowResize() {
+            if (camera && renderer) { // Add check
+                 camera.aspect = window.innerWidth / window.innerHeight;
+                 camera.updateProjectionMatrix();
+                 renderer.setSize(window.innerWidth, window.innerHeight);
+             }
+        }
+
+        // --- 初始化 ---
+        try {
+            init();
+        } catch (error) {
+            console.error("Initialization failed:", error);
+            // Optionally display an error message to the user
+            document.body.innerHTML = "<p>抱歉，載入時發生錯誤。請檢查主控台以獲取詳細資訊。</p>";
+        }
+
 
     </script>
 </body>
