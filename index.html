@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wallpaper Showcase</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        .container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            padding: 16px;
+        }
+        .wallpaper {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            overflow: hidden;
+            text-align: center;
+            transition: transform 0.3s;
+        }
+        .wallpaper:hover {
+            transform: scale(1.05);
+        }
+        .wallpaper img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        .wallpaper h3 {
+            margin: 8px 0;
+            font-size: 1rem;
+        }
+        a {
+            text-decoration: none;
+            color: inherit;
+        }
+    </style>
+</head>
+<body>
+    <h1 style="text-align: center; padding: 16px;">Wallpaper Showcase</h1>
+    <div class="container">
+        <a href="./endless-road" class="wallpaper" target="_blank">
+            <img src="./endless-road/preview.jpg" alt="endless-road">
+            <h3>Endless Road</h3>
+        </a>
+    </div>
+</body>
+</html>
