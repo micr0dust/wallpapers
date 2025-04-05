@@ -33,6 +33,10 @@
         const segmentLength = 40; const roadWidth = 8; const numSegments = 30;
         const terrainWidth = 600; const terrainDetail = 38;
         let driveSpeed = 15.0; let currentPathDistance = 0;
+        let isPaused = false;
+        let animationFrameId = null; // 用於 requestAnimationFrame 的 ID
+
+        const MAX_DELTA_TIME = 0.5;
 
         // --- 噪音生成器 ---
         // ... (保持不變) ...
@@ -96,9 +100,23 @@
         const guardrailMaterial = new THREE.MeshStandardMaterial({ color: 0xaaaaaa, roughness: 0.6, metalness: 0.4 });
         const guardrailThreshold = 2.5;
 
-        // === 新增：動畫暫停控制 ===
-        let isPaused = false;
-        let animationFrameId = null; // To potentially cancel the frame if needed
+        // === 新增：動畫暫停/恢復函數 ===
+        function pauseAnimation() {
+            if (!isPaused) {
+                console.log("Animation Paused");
+                isPaused = true;
+                // 不需要停止 clock 或取消 frame，animate 函數會處理
+            }
+        }
+
+        function resumeAnimation() {
+            if (isPaused) {
+                console.log("Animation Resumed");
+                isPaused = false;
+                // **重要：** 重置 clock 的 delta time，避免時間跳躍
+                if (clock) clock.getDelta();
+            }
+        }
 
 
         // --- 輔助函數：Smoothstep --- (不變)
@@ -293,47 +311,88 @@
             }
         }
 
-        // === 新增：設置可見性/焦點監聽器 ===
+        // === 修改：設置可見性/焦點監聽器 ===
         function setupVisibilityListeners() {
-            // --- Standard Browser Visibility API ---
+            // --- 標準瀏覽器可見性 API (保持不變) ---
             document.addEventListener('visibilitychange', () => {
                 if (document.hidden) {
+                    console.log("Browser detected hidden state."); // 添加日誌
                     pauseAnimation();
                 } else {
+                    console.log("Browser detected visible state."); // 添加日誌
                     resumeAnimation();
                 }
             });
 
-            // --- Focus / Blur Events (Optional but can help) ---
-             window.addEventListener('blur', pauseAnimation);
-             window.addEventListener('focus', resumeAnimation);
+            // --- 焦點 / 失去焦點事件 (保持不變，但可選，因為WE可能有自己的處理) ---
+            window.addEventListener('blur', () => {
+                console.log("Browser detected blur."); // 添加日誌
+                // pauseAnimation(); // 可以考慮在WE環境下註解掉，避免衝突
+            });
+            window.addEventListener('focus', () => {
+                console.log("Browser detected focus."); // 添加日誌
+                // resumeAnimation(); // 可以考慮在WE環境下註解掉
+            });
 
 
-            // --- Wallpaper Engine Visibility ---
-            // Check if the Wallpaper Engine API is available
+            // --- Wallpaper Engine 可見性與暫停處理 (改進) ---
             if (window.wallpaperPropertyListener) {
+                console.log("Wallpaper Engine API detected. Setting up WE listener.");
                 window.wallpaperPropertyListener.applyUserProperties = function(properties) {
+                    // **新增：打印收到的所有屬性，方便調試**
+                    console.log("WE received properties:", JSON.stringify(properties));
+
+                    let shouldPause = false;
+
+                    // 檢查 'visibility' 屬性 (如果WE提供)
                     if (properties.visibility) {
-                        // WE provides a 'visibility' property
-                         if (!properties.visibility.value) { // Check if the value is false (hidden)
-                            pauseAnimation();
+                        if (properties.visibility.value === false) {
+                            console.log("WE property 'visibility' is false.");
+                            shouldPause = true;
+                        } else {
+                            console.log("WE property 'visibility' is true.");
+                            // 如果 visibility 為 true，先假設不暫停，但下面可能被 pause 覆蓋
+                        }
+                    }
+
+                    // **新增：檢查常見的 'pause' 屬性 (或其他你可能在 project.json 定義的)**
+                    // 你需要確定 WE 實際發送的屬性名稱是什麼。 'pause' 是一個常見的例子。
+                    if (properties.pause) { // <--- 嘗試監聽名為 'pause' 的屬性
+                        if (properties.pause.value === true) {
+                            console.log("WE property 'pause' is true.");
+                            shouldPause = true; // 如果 pause 為 true，強制暫停
+                        } else {
+                            console.log("WE property 'pause' is false.");
+                            // 如果 pause 為 false，即使 visibility 為 false (理論上不該發生)，也可能不暫停？
+                            // 通常 pause:false 優先級不高，主要看 pause:true 和 visibility:false
+                        }
+                    }
+
+                    // **根據最終判斷來執行動作**
+                    if (shouldPause) {
+                        pauseAnimation();
+                    } else {
+                        // 只有在沒有任何暫停條件時才恢復
+                        // （防止 visibility:true 但 pause:true 的情況下錯誤地恢復）
+                        if (!isPaused) { // 避免不必要的 resume 調用
+                            // console.log("No pause conditions met, ensuring resumed state.");
                         } else {
                             resumeAnimation();
                         }
                     }
-                     // You might also listen for pause/play events if your WE settings allow it
-                     if (properties.pause) { // Hypothetical 'pause' property
-                         if (properties.pause.value) {
-                             pauseAnimation();
-                         } else {
-                             resumeAnimation();
-                         }
-                     }
                 };
+                // **新增：請求 WE 在初始化時發送一次當前屬性狀態**
+                // 這有助於確保初始狀態正確，而不是等待第一次屬性變更
+                // 注意：這不是標準 API，但有時有用，或者 WE 會自動發送初始狀態
+                if (window.wallpaperRequestUserProperties) {
+                    console.log("Requesting initial WE properties.");
+                    window.wallpaperRequestUserProperties();
+                }
+
+            } else {
+                console.log("Wallpaper Engine API not detected, relying solely on browser events.");
             }
-        }
-
-
+}
         // --- 動畫循環 (修改) ---
         function animate() {
             // Request the next frame **before** doing work.
@@ -347,6 +406,18 @@
 
             // --- Proceed with animation if not paused ---
             const deltaTime = clock.getDelta(); // Get time since last *rendered* frame
+
+            if (deltaTime > MAX_DELTA_TIME) {
+                // 打印日誌到控制台（如果 console.log 能工作的話）
+                // console.log(`DeltaTime too large (${deltaTime.toFixed(3)}s), skipping update. Likely resumed from pause.`);
+
+                // **直接跳過本幀的遊戲邏輯更新**
+                // 你可以選擇是否渲染這一幀，通常渲染一下比較好，避免畫面卡住
+                if (renderer && scene && camera) {
+                     renderer.render(scene, camera);
+                }
+                return; // 退出 animate 函數，等待下一幀 rAF 回調
+            }
 
             // **Only update game state if time has actually passed**
             // (Helps avoid issues if deltaTime is zero right after resuming)
@@ -373,7 +444,6 @@
                 const guardrailsToRemove = []; guardrailSegments.forEach((g, i) => { if ((-g.userData.distance - segmentLength) > camera.position.z + recycleThreshold) { guardrailsToRemove.push(i); scene.remove(g); if (g.geometry) g.geometry.dispose(); } }); for (let i = guardrailsToRemove.length - 1; i >= 0; i--) guardrailSegments.splice(guardrailsToRemove[i], 1);
                 // ...(其他回收邏輯不變)...
                 const embankmentToRemove = []; embankmentSegments.forEach((e, i) => { if ((-e.userData.distance - segmentLength) > camera.position.z + recycleThreshold) { embankmentToRemove.push(i); scene.remove(e); if (e.geometry) e.geometry.dispose(); } }); for (let i = embankmentToRemove.length - 1; i >= 0; i--) embankmentSegments.splice(embankmentToRemove[i], 1); const segmentsToRemove = []; roadSegments.forEach((s, i) => { if ((-s.userData.distance - segmentLength) > camera.position.z + recycleThreshold) { segmentsToRemove.push(i); scene.remove(s); if (s.geometry) s.geometry.dispose(); } }); for (let i = segmentsToRemove.length - 1; i >= 0; i--) roadSegments.splice(segmentsToRemove[i], 1); const terrainToRemove = []; terrainSegments.forEach((s, i) => { if ((-s.userData.distance - segmentLength) > camera.position.z + recycleThreshold) { terrainToRemove.push(i); scene.remove(s); if (s.geometry) s.geometry.dispose(); } }); for (let i = terrainToRemove.length - 1; i >= 0; i--) terrainSegments.splice(terrainToRemove[i], 1); const pillarsToRemove = []; pillars.forEach((p, i) => { if (p.position.z > camera.position.z + recycleThreshold + segmentLength) { pillarsToRemove.push(i); scene.remove(p); if (p.geometry) p.geometry.dispose(); } }); for (let i = pillarsToRemove.length - 1; i >= 0; i--) pillars.splice(pillarsToRemove[i], 1); let maxDistance = 0; roadSegments.forEach(s => maxDistance = Math.max(maxDistance, s.userData.distance)); let maxTerrainDistance = 0; terrainSegments.forEach(s => maxTerrainDistance = Math.max(maxTerrainDistance, s.userData.distance)); const furthestPointRequired = currentPathDistance + generateThreshold; while (maxTerrainDistance < furthestPointRequired + segmentLength * 3) { const nextTerrainStart = maxTerrainDistance + segmentLength; if (terrainSegments.length > 0 && terrainSegments[0].material) { addTerrainSegment(nextTerrainStart, terrainSegments[0].material); maxTerrainDistance = nextTerrainStart; } else if (scene.getObjectByName("terrainMaterialPlaceholder")) { /* Handle case where initial material needed */ addTerrainSegment(nextTerrainStart, scene.getObjectByName("terrainMaterialPlaceholder").material); maxTerrainDistance = nextTerrainStart; } else { /* Fallback or break if no material found */ console.warn("Cannot find terrain material to add new segment."); break; } } while (maxDistance < furthestPointRequired) { const nextSegmentStart = maxDistance + segmentLength; if (roadSegments.length > 1 && roadSegments[0].material && roadSegments[1].material) { addRoadSegment(nextSegmentStart, roadSegments[0].material, roadSegments[1].material); maxDistance = nextSegmentStart; } else if (scene.getObjectByName("roadMaterialPlaceholder") && scene.getObjectByName("lineMaterialPlaceholder")) { /* Handle case where initial materials needed */ addRoadSegment(nextSegmentStart, scene.getObjectByName("roadMaterialPlaceholder").material, scene.getObjectByName("lineMaterialPlaceholder").material); maxDistance = nextSegmentStart; } else { /* Fallback or break */ console.warn("Cannot find road/line materials to add new segment."); break; } }
-
                  // **Ensure materials are disposed correctly during cleanup**
                 // (Added dispose calls in the recycle loops above)
 

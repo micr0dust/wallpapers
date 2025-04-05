@@ -1,0 +1,20 @@
+{
+    "type": "web",
+    "file": "index.html",
+    "title": "Mini Agars",
+    "preview": "preview.jpg",
+    "description": "A dynamic wallpaper that simulates AI-controlled cells devouring each other, avoiding viruses and growing in an Agar.io-style environment.",
+    "supportsaudioprocessing": false,
+    "general" : {
+        "properties": {
+            "cellbasespeed": {
+                "type": "slider",
+                "text": "Cell Base Speed Multiplier",
+                "min": 0.5,
+                "max": 10.0,
+                "step": 0.1,
+                "value": 3.0 
+            }
+        }
+    }
+}
