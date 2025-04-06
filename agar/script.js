@@ -9925,8 +9925,9 @@ const playerSplitBurstSpeed = 1; // *** Reduced burst speed slightly ***
 const respawnDelay = 5000;
 const MAX_DELTA_TIME = 50;
 const LEADERBOARD_UPDATE_INTERVAL = 300;
-const MERGE_COOLDOWN = 5000; // *** Slightly increased merge cooldown ***
+const MERGE_COOLDOWN = 9000; // *** Slightly increased merge cooldown ***
 
+const FLEE_EDGE_DISTANCE_THRESHOLD = 25;
 const PLAYER_EAT_DISTANCE_FACTOR = 0.4;
 const VIRUS_SPLIT_DISTANCE_FACTOR = 0.4;
 const MERGE_OVERLAP_FACTOR = 0.8; // *** ADD THIS (0.0 to 1.0) - Higher value = LESS overlap needed for merge ***
@@ -9939,7 +9940,7 @@ const REPULSION_EFFECTIVE_DISTANCE_FACTOR = 1.4;
 const REPULSION_MIN_FORCE_FACTOR = 0.05; // *** 最低力因子，可以設更小，例如 0.05 ***
 
 // *** 新增衰減窗口常數 ***
-const REPULSION_FADE_WINDOW_MS = 1000; // 排斥力在合併前多少毫秒開始衰減 (例如 1000ms = 1秒)
+const REPULSION_FADE_WINDOW_MS = 3000; // 排斥力在合併前多少毫秒開始衰減 (例如 1000ms = 1秒)
 
 // *** 新增：餵食病毒相關常數 ***
 const AI_CAN_FEED_VIRUS = true;           // AI是否啟用餵食病毒功能
@@ -9948,6 +9949,7 @@ const VIRUS_FEED_MASS_COST = 1000;        // 每次餵食損失的質量
 const VIRUS_MAX_FEED_COUNT = 7;         // 病毒被餵食多少次後會分裂
 const FEED_VIRUS_RANGE_FACTOR = 0.8;    // AI視野的多少比例內尋找目標和病毒
 const FEED_TARGET_MAX_MASS_FACTOR = 100; // 目標質量不能超過自身質量的多少倍 (避免餵超級巨無霸)
+const FEED_EDGE_PROXIMITY_THRESHOLD = 50; // ** NEW: Consider feeding if edges are within this pixel distance **
 
 // *** 新增：用於餵食動畫的顆粒類別 ***
 const PELLET_SPEED = 15;       // 飼料顆粒的飛行速度
@@ -9959,8 +9961,8 @@ const MAX_SPAWN_ATTEMPTS = 100;    // 尋找安全生成點的最大嘗試次數
 const SPAWN_SAFETY_BUFFER = 15;   // 生成時與其他對象保持的額外距離緩衝
 
 // *** Speed adjustment ***
-let cellBaseSpeedMultiplier = 3.0; // *** 基礎速度乘數 ***
-const CELL_SPEED_MASS_FACTOR = 0.045; // *** Slightly increased mass effect on speed reduction ***
+let cellBaseSpeedMultiplier = 6.0; // *** 基礎速度乘數 ***
+const CELL_SPEED_MASS_FACTOR = 1.1; // *** Slightly increased mass effect on speed reduction ***
 
 // *** 新增：遊戲重置相關常數 ***
 const RESET_ON_MAP_COVERAGE = true;     // 是否啟用覆蓋重置
@@ -10268,7 +10270,7 @@ class LogicalPlayer {
 
         // Reset perception variables for this frame
         let nearestFood = null, minDistFoodSq = viewRadiusSq * 1.2;
-        let nearestThreatPlayerCenter = null, minDistThreatSq = viewRadiusSq; // Center of the nearest UNBLOCKED threat
+        let nearestThreatPlayerCenter = null, minDistThreatSq = Infinity; // ** Initialize to Infinity **
         let nearestPreyPlayerCenter = null, minDistPreySq = viewRadiusSq;
         let nearestSafeVirus = null, minDistSafeVirusSq = viewRadiusSq * 0.5;
         let nearestOpportunityTarget = null, minDistOpportunitySq = viewRadiusSq;
@@ -10277,20 +10279,22 @@ class LogicalPlayer {
         let nearestDangerousVirus = null, minDistDangerousVirusSq = viewRadiusSq * 0.3;
 
         // --- Feeding Specific Variables ---
-        let targetToFeedVirus = null; // Center of the player targeted for feeding
-        let virusToFeed = null;       // The specific virus instance to feed
-        let isHighPriorityFeed = false; // Flag for the "blocking" scenario feed
-        let minDistToFeedableTargetSq = viewRadiusSq * (FEED_VIRUS_RANGE_FACTOR ** 2); // Track distance to feedable targets
+        let targetToFeedVirus = null;
+        let virusToFeed = null;
+        let isHighPriorityFeed = false;
+        let minDistToFeedableTargetSq = viewRadiusSq * (FEED_VIRUS_RANGE_FACTOR ** 2);
 
-        const largestOwnCell = this.getLargestCell(); // Get largest cell instance
-        if (!largestOwnCell) return; // Should not happen if cells.length > 0, but safety
+        const largestOwnCell = this.getLargestCell();
+        if (!largestOwnCell) return;
         const largestOwnCellMass = largestOwnCell.mass;
-        const largestOwnCellRadius = largestOwnCell.radius;
+        const largestOwnCellRadius = largestOwnCell.radius; // Use actual radius
         const ownSplitState = this.isSplitState();
 
         const canBeSplitMassThreshold = virusRadius * virusRadius * Math.PI * virusSplitMassThresholdMultiplier;
         const isSmallEnoughToHide = largestOwnCellMass < canBeSplitMassThreshold * 0.95;
         const isBigEnoughToSplit = largestOwnCellMass > canBeSplitMassThreshold;
+
+        let foundUnblockedThreat = false; // *** Flag to track if any unblocked threat was found ***
 
         // --- Perception Loop (Iterate through other players) ---
         for (const other of players) {
@@ -10301,22 +10305,23 @@ class LogicalPlayer {
 
             if (dSqToCenter < viewRadiusSq) { // --- Player 'other' is in view ---
                 const largestOtherCellMass = other.findLargestCellMass();
+                // *** Get the actual radius of the largest opponent cell ***
+                const otherLargestRadius = other.findLargestCellRadius();
                 const otherSplitState = other.isSplitState();
                 let isVirusBlockingThisThreat = false;
                 let specificBlockingVirus = null;
 
                 // --- A: Threat Assessment & Blocking Check ---
-                if (largestOwnCellMass > 0 && largestOtherCellMass / largestOwnCellMass > 1.25) { // Added safety check for largestOwnCellMass > 0
+                if (largestOwnCellMass > 0 && largestOtherCellMass / largestOwnCellMass > 1.25) {
                     const isThreatBigEnoughToSplit = largestOtherCellMass > canBeSplitMassThreshold * 1.1;
 
-                    // Check if a virus blocks this specific threat
+                    // Check if a virus blocks this specific threat (using centers is ok here)
                     if (isSmallEnoughToHide && isThreatBigEnoughToSplit) {
                         for (const virus of viruses) {
+                            // ... [existing virus blocking check logic - no changes needed here] ...
                             const distSqAtoV = distanceSq(center.x, center.y, virus.x, virus.y);
                             const distSqVtoT = distanceSq(virus.x, virus.y, otherCenter.x, otherCenter.y);
-                            // Condition 1: Virus roughly between AI and Threat
-                            if (distSqAtoV + distSqVtoT < dSqToCenter * 1.25) { // Slightly increased tolerance
-                                // Condition 2: Virus close to the AI-Threat line
+                            if (distSqAtoV + distSqVtoT < dSqToCenter * 1.25) {
                                 const Ax = center.x, Ay = center.y;
                                 const Tx = otherCenter.x, Ty = otherCenter.y;
                                 const Vx = virus.x, Vy = virus.y;
@@ -10325,324 +10330,310 @@ class LogicalPlayer {
                                 let distSqToLine = Infinity;
                                 if (lineLenSq > 0.001) {
                                     const t = ((Vx - Ax) * dx + (Vy - Ay) * dy) / lineLenSq;
-                                    if (t >= -0.1 && t <= 1.1) { // Projection check
+                                    if (t >= -0.1 && t <= 1.1) {
                                             const closestX = Ax + t * dx;
                                             const closestY = Ay + t * dy;
                                             distSqToLine = distanceSq(Vx, Vy, closestX, closestY);
                                     }
-                                } else { distSqToLine = distSqAtoV; } // A and T are same point
-
-                                const blockingToleranceSq = (virus.radius * 2.0) ** 2; // Use 2.0 multiplier
-
+                                } else { distSqToLine = distSqAtoV; }
+                                const blockingToleranceSq = (virus.radius * 2.0) ** 2;
                                 if (distSqToLine < blockingToleranceSq) {
                                     isVirusBlockingThisThreat = true;
-                                    specificBlockingVirus = virus; // Store the specific virus
-                                    // console.log(`${this.name}: Threat ${other.name} is BLOCKED by virus at (${virus.x.toFixed(0)}, ${virus.y.toFixed(0)})`);
-                                    break; // Found a blocking virus for this threat
+                                    specificBlockingVirus = virus;
+                                    break;
                                 }
                             }
-                        } // End virus loop for blocking check
-                    } // End if small enough to hide
+                        }
+                    }
 
-                    // If threat is NOT blocked, update nearestThreatPlayerCenter
-                    if (!isVirusBlockingThisThreat) {
-                        const otherLargestRadius = Math.sqrt(largestOtherCellMass / Math.PI);
-                        // Re-evaluate distance conditions for fleeing if needed (edge proximity, etc.)
-                        const fleeTriggerRadiusMultiplier = 1.6;
-                        const threatDistanceSqThreshold = (otherLargestRadius * fleeTriggerRadiusMultiplier) ** 2;
-                        const edgeProximityThreshold = 20;
-                        const centerDistThresholdForEdge = largestOwnCellRadius + otherLargestRadius + edgeProximityThreshold;
-                        const centerDistSqThresholdForEdge = centerDistThresholdForEdge ** 2;
-
-                        if (dSqToCenter < Math.min(minDistThreatSq, threatDistanceSqThreshold) || dSqToCenter < centerDistSqThresholdForEdge) {
-                            if (dSqToCenter < minDistThreatSq) { // Keep track of the closest unblocked threat
+                    // --- If threat is NOT blocked, evaluate distance for fleeing ---
+                    const edgeTriggerDistSq = (largestOwnCellRadius + otherLargestRadius + FLEE_EDGE_DISTANCE_THRESHOLD) ** 2;
+                     if (!isVirusBlockingThisThreat) {
+                         foundUnblockedThreat = true;
+                         if (dSqToCenter < edgeTriggerDistSq) {
+                            if (dSqToCenter < minDistThreatSq) {
                                 minDistThreatSq = dSqToCenter;
                                 nearestThreatPlayerCenter = otherCenter;
                             }
-                        }
-                    }
-                    // If threat IS blocked, we *don't* set nearestThreatPlayerCenter based on it.
-                    // We will handle it in the feeding check below.
+                         }
+                     } // End UNBLOCKED threat distance evaluation
 
-                } // --- End Threat Assessment ---
+                    // --- B: Feeding Opportunity Assessment (Check remains the same) ---
+                    // ...(existing feeding logic)...
+                    const canFeed = AI_CAN_FEED_VIRUS && largestOwnCellMass >= MIN_MASS_TO_FEED_VIRUS && !ownSplitState;
+                    const feedEdgeTriggerDistSq = (largestOwnCellRadius + otherLargestRadius + FEED_EDGE_PROXIMITY_THRESHOLD) ** 2;
+                    // *** Check if target is in range based on EITHER center distance OR edge proximity ***
+                    const isInCenterRange = dSqToCenter < minDistToFeedableTargetSq; // Original check
+                    const areEdgesClose = dSqToCenter < feedEdgeTriggerDistSq;      // New edge check
+                    const isValidFeedTarget = largestOtherCellMass > canBeSplitMassThreshold * 1.1 && // Target big enough to split
+                                        largestOtherCellMass > largestOwnCellMass * 0.7 &&
+                                        largestOtherCellMass < largestOwnCellMass * FEED_TARGET_MAX_MASS_FACTOR && // Added max mass factor check
+                                        (isInCenterRange || areEdgesClose); // *** USE OR Condition ***
 
-                // --- B: Feeding Opportunity Assessment ---
-                const canFeed = AI_CAN_FEED_VIRUS && largestOwnCellMass >= MIN_MASS_TO_FEED_VIRUS && !ownSplitState;
-                const isValidFeedTarget = largestOtherCellMass > canBeSplitMassThreshold * 1.1 && // Target big enough to split
-                                            largestOtherCellMass > largestOwnCellMass * 0.7 && // Target not drastically smaller (relaxed from 0.7)
-                                            dSqToCenter < minDistToFeedableTargetSq; // Target in range
-
-                if (canFeed && isValidFeedTarget) {
-
-                    // --- B1: High Priority - Feed the Blocking Virus? ---
-                    if (isVirusBlockingThisThreat && specificBlockingVirus) {
-                        // Check safety: Is the LARGEST cell far enough from THIS specific blocking virus?
-                        const dSqLargestToBlockingVirus = distanceSq(largestOwnCell.x, largestOwnCell.y, specificBlockingVirus.x, specificBlockingVirus.y);
-                        const edgeBuffer = 15; // Buffer between edges
-                        const minSafeDistSq = (largestOwnCell.radius + specificBlockingVirus.radius + edgeBuffer) ** 2;
-
-                        if (dSqLargestToBlockingVirus > minSafeDistSq) {
-                            // Conditions met: Target is blocked by a specific virus, and we're safe from that virus.
-                            console.log(`>>> HIGH PRIORITY Feed Trigger: ${this.name} targeting blocked ${other.name} via virus at (${specificBlockingVirus.x.toFixed(0)})`);
-                            // Prioritize this feed action if it's closer than any previously found feed target
-                            if (dSqToCenter < minDistToFeedableTargetSq) {
-                                targetToFeedVirus = otherCenter;
-                                virusToFeed = specificBlockingVirus;
-                                isHighPriorityFeed = true;
-                                minDistToFeedableTargetSq = dSqToCenter; // Update closest feed target distance
-                            }
-                        } else {
-                                console.log(`High Priority Feed Aborted [${this.name}]: Largest cell too close to blocking virus (${specificBlockingVirus.x.toFixed(0)}).`);
-                        }
-                    }
-                    // --- B2: Regular Feed Check (Only if no high-priority feed found YET) ---
-                    // Only search for other viruses if we haven't already decided on a high-priority feed in this frame
-                    else if (!isHighPriorityFeed && virusToFeed == null) {
-                        for (const virus of viruses) {
-                            // Avoid re-checking the blocking virus if it was deemed unsafe above
-                            if (isVirusBlockingThisThreat && virus === specificBlockingVirus) continue;
-
-                            // Safety Check: Largest cell vs current virus
-                            const dSqLargestToVirus = distanceSq(largestOwnCell.x, largestOwnCell.y, virus.x, virus.y);
-                            const edgeBuffer = 15;
-                            const minSafeDistSq = (largestOwnCell.radius + virus.radius + edgeBuffer) ** 2;
-                            const isSafeFromThisVirus = dSqLargestToVirus > minSafeDistSq;
-                            const isInRange = dSqLargestToVirus < viewRadiusSq * (FEED_VIRUS_RANGE_FACTOR**2) * 0.9; // Check range relative to largest cell
-
-                            if (isSafeFromThisVirus && isInRange) {
-                                // Strategic Check 1: Virus close to AI(center)-Target(center) line?
-                                const Ax = center.x, Ay = center.y;
-                                const Tx = otherCenter.x, Ty = otherCenter.y;
-                                const Vx = virus.x, Vy = virus.y;
-                                // ... [calculate distSqToLineSegment as before] ...
-                                let distSqToLineSegment = /* ... */ Infinity; // Replace with calculation
-                                // Calculate distSqToLineSegment here (copy from previous versions)
-                                const lineLenSqReg = (Tx - Ax)**2 + (Ty - Ay)**2;
-                                if (lineLenSqReg > 0.001) {
-                                    const tReg = ((Vx - Ax) * (Tx - Ax) + (Vy - Ay) * (Ty - Ay)) / lineLenSqReg;
-                                    if (tReg >= -0.1 && tReg <= 1.1) {
-                                        const closestXReg = Ax + tReg * (Tx - Ax);
-                                        const closestYReg = Ay + tReg * (Ty - Ay);
-                                        distSqToLineSegment = distanceSq(Vx, Vy, closestXReg, closestYReg);
+                    if (canFeed && isValidFeedTarget) {
+                        // *** Log if edge proximity triggered the check ***
+                        // if (areEdgesClose && !isInCenterRange) {
+                        //    console.log(`${this.name}: Considering feed on ${other.name} due to EDGE proximity (Centers far). Dist: ${Math.sqrt(dSqToCenter).toFixed(0)}`);
+                        // }
+    
+                        // --- B1: High Priority - Feed the Blocking Virus? ---
+                        // This logic remains the same, it just runs if isValidFeedTarget is true
+                        if (isVirusBlockingThisThreat && specificBlockingVirus) {
+                            // ... [existing high priority feed logic - check safety from blocking virus] ...
+                                const dSqLargestToBlockingVirus = distanceSq(largestOwnCell.x, largestOwnCell.y, specificBlockingVirus.x, specificBlockingVirus.y);
+                                const edgeBuffer = 5;
+                                const minSafeDistSq = (largestOwnCell.radius + specificBlockingVirus.radius + edgeBuffer) ** 2;
+                                if (dSqLargestToBlockingVirus > minSafeDistSq) {
+                                    // Prioritize this feed action if it's closer than any previously found feed target
+                                    // *** IMPORTANT: Use dSqToCenter for prioritization, even if triggered by edge ***
+                                    // This prioritizes the geometrically closer target among valid candidates.
+                                    if (dSqToCenter < minDistToFeedableTargetSq) {
+                                        // console.log(`>>> HIGH PRIORITY Feed Trigger: ${this.name} targeting blocked ${other.name} via virus at (${specificBlockingVirus.x.toFixed(0)})`);
+                                        targetToFeedVirus = otherCenter;
+                                        virusToFeed = specificBlockingVirus;
+                                        isHighPriorityFeed = true;
+                                        minDistToFeedableTargetSq = dSqToCenter; // Update closest feed target distance
                                     }
-                                } else { distSqToLineSegment = distanceSq(Vx, Vy, Ax, Ay);}
-
-
-                                const tolerance = virus.radius * 2.0; // Tolerance multiplier
-                                const toleranceSq = tolerance * tolerance;
-                                const isVirusOnLine = distSqToLineSegment < toleranceSq;
-
-                                // Strategic Check 2: Target edge near this virus?
-                                const distSqTargetToVirus = distanceSq(otherCenter.x, otherCenter.y, virus.x, virus.y);
-                                const targetLargestRadius = Math.sqrt(largestOtherCellMass / Math.PI);
-                                const targetEdgeNearVirusThreshold = virus.radius + targetLargestRadius * 0.7; // Threshold multiplier
-                                const targetEdgeNearVirusThresholdSq = targetEdgeNearVirusThreshold ** 2;
-                                const isTargetEdgeNear = distSqTargetToVirus < targetEdgeNearVirusThresholdSq;
-
-                                if (isVirusOnLine && isTargetEdgeNear) {
-                                    // Regular feed opportunity found
-                                        console.log(`Regular Feed Opportunity Found: ${this.name} vs ${other.name} via virus ${virus.x.toFixed(0)}`);
-                                        // Prioritize if closer than previous regular find
-                                        if (dSqToCenter < minDistToFeedableTargetSq) {
-                                            targetToFeedVirus = otherCenter;
-                                            virusToFeed = virus;
-                                            // isHighPriorityFeed remains false
-                                            minDistToFeedableTargetSq = dSqToCenter;
-                                        }
-                                        break; // Found a suitable regular virus for this target
+                                } else {
+                                    // console.log(`High Priority Feed Aborted [${this.name}]: Largest cell too close to blocking virus (${specificBlockingVirus.x.toFixed(0)}).`);
                                 }
-                            }
-                        } // End regular virus search loop
-                    } // End regular feed check conditional
-                } // --- End Feeding Opportunity Assessment ---
+                        }
+                        // --- B2: Regular Feed Check ---
+                        // This logic also remains the same, running if isValidFeedTarget is true and no high-priority found yet
+                        else if (!isHighPriorityFeed && virusToFeed == null) {
+                            for (const virus of viruses) {
+                                // ... [existing regular feed logic - check safety, line proximity, target edge near virus] ...
+                                if (isVirusBlockingThisThreat && virus === specificBlockingVirus) continue;
+                                const dSqLargestToVirus = distanceSq(largestOwnCell.x, largestOwnCell.y, virus.x, virus.y);
+                                const edgeBuffer = 15;
+                                const minSafeDistSq = (largestOwnCell.radius + virus.radius + edgeBuffer) ** 2;
+                                const isSafeFromThisVirus = dSqLargestToVirus > minSafeDistSq;
+                                const isInRangeToShoot = dSqLargestToVirus < viewRadiusSq * (FEED_VIRUS_RANGE_FACTOR**2) * 0.9; // Virus in shooting range
+    
+                                    if (isSafeFromThisVirus && isInRangeToShoot) {
+                                        const Ax = center.x, Ay = center.y; // Use AI center of mass for line check
+                                        const Tx = otherCenter.x, Ty = otherCenter.y; // Target center
+                                        const Vx = virus.x, Vy = virus.y;
+                                        let distSqToLineSegment = Infinity;
+                                        const lineLenSqReg = (Tx - Ax)**2 + (Ty - Ay)**2;
+                                        if (lineLenSqReg > 0.001) {
+                                            const tReg = ((Vx - Ax) * (Tx - Ax) + (Vy - Ay) * (Ty - Ay)) / lineLenSqReg;
+                                            if (tReg >= -0.1 && tReg <= 1.1) { // Check projection is within segment (approx)
+                                                const closestXReg = Ax + tReg * (Tx - Ax);
+                                                const closestYReg = Ay + tReg * (Ty - Ay);
+                                                distSqToLineSegment = distanceSq(Vx, Vy, closestXReg, closestYReg);
+                                            } else { // Projection outside segment, use distance to closer endpoint
+                                                const distSqToA = distanceSq(Vx,Vy,Ax,Ay);
+                                                const distSqToT = distanceSq(Vx,Vy,Tx,Ty);
+                                                distSqToLineSegment = Math.min(distSqToA, distSqToT);
+                                            }
+                                        } else { distSqToLineSegment = distanceSq(Vx, Vy, Ax, Ay);} // A and T are same point
+                                        const toleranceSq = (virus.radius * 2.5) ** 2; // Slightly larger tolerance for line check
+                                        const isVirusOnLine = distSqToLineSegment < toleranceSq;
+    
+                                        const distSqTargetToVirus = distanceSq(otherCenter.x, otherCenter.y, virus.x, virus.y);
+                                        const targetEdgeNearVirusThresholdSq = (virus.radius + otherLargestRadius * 0.8) ** 2; // Target edge close to virus
+                                        const isTargetEdgeNear = distSqTargetToVirus < targetEdgeNearVirusThresholdSq;
+    
+                                        if (isVirusOnLine && isTargetEdgeNear) {
+                                            // console.log(`Regular Feed Opportunity Found: ${this.name} vs ${other.name} via virus ${virus.x.toFixed(0)}`);
+                                            // Prioritize based on center distance still
+                                            if (dSqToCenter < minDistToFeedableTargetSq) {
+                                                targetToFeedVirus = otherCenter;
+                                                virusToFeed = virus;
+                                                minDistToFeedableTargetSq = dSqToCenter;
+                                            }
+                                            break; // Found a suitable regular virus for this target
+                                        }
+                                    }
+                            } // End regular virus search loop
+                        } // End regular feed check conditional
+                    } // --- End Master Feed Check (if canFeed && isValidFeedTarget) ---
+
+                } // --- End Threat Check ---
 
 
                 // --- C: Other Assessments (Prey, Opportunity, Threats to Fragments) ---
-                // Run these ONLY if no feed action has been decided for this frame yet
-                if (virusToFeed == null) {
-                    // Check for Prey (Target is smaller)
-                    if (largestOwnCellMass > largestOtherCellMass * 1.3) {
+                // Run these ONLY if no feed action has been decided and no *unblocked* threat requires immediate fleeing
+                // *** Modified Condition: Only hunt/seek if no unblocked threat is close and no feeding planned ***
+                if (virusToFeed == null && nearestThreatPlayerCenter == null) { // Check if nearestThreatPlayerCenter is null (meaning no UNBLOCKED threat was close enough)
+                    // Check for Prey
+                    if (largestOwnCellMass > largestOtherCellMass * 1.3) { // Prey must be significantly smaller
                         if (dSqToCenter < minDistPreySq) {
                             minDistPreySq = dSqToCenter;
                             nearestPreyPlayerCenter = otherCenter;
                         }
                     }
 
-                    // Check for Opportunity Targets (Enemy split fragments)
-                    if (otherSplitState) {
-                        // ... [Opportunity target logic - check my largest cell vs their fragments] ...
-                        for (const otherCell of other.cells) {
-                            if (largestOwnCellMass > otherCell.mass * 1.15) {
-                                const dSqToOtherCell = distanceSq(largestOwnCell.x, largestOwnCell.y, otherCell.x, otherCell.y); // Use largest cell distance
-                                if (dSqToOtherCell < minDistOpportunitySq) {
-                                        // Prioritize if much closer than regular prey
-                                        if (dSqToOtherCell < minDistPreySq * 0.8) {
-                                        minDistOpportunitySq = dSqToOtherCell;
-                                        nearestOpportunityTarget = { x: otherCell.x, y: otherCell.y };
-                                        }
-                                }
+                    // Check for Opportunity Targets
+                     if (otherSplitState) {
+                         for (const otherCell of other.cells) {
+                             if (largestOwnCellMass > otherCell.mass * 1.15) {
+                                 const dSqToOtherCell = distanceSq(largestOwnCell.x, largestOwnCell.y, otherCell.x, otherCell.y);
+                                 if (dSqToOtherCell < minDistOpportunitySq) {
+                                     if (dSqToOtherCell < minDistPreySq * 0.8) {
+                                         minDistOpportunitySq = dSqToOtherCell;
+                                         nearestOpportunityTarget = { x: otherCell.x, y: otherCell.y };
+                                     }
+                                 }
+                             }
+                         }
+                     }
+
+                    // Check Threats to Own Fragments
+                    if (ownSplitState) {
+                        const vulnerableResult = this.findNearestVulnerableCellToThreat(otherCenter, largestOtherCellMass);
+                        if (vulnerableResult.cell) {
+                            // const otherLargestRadius = Math.sqrt(largestOtherCellMass / Math.PI); // Already calculated
+                            const threatToFragDistSq = (otherLargestRadius * 1.5)**2;
+                            if (vulnerableResult.distSq < threatToFragDistSq && vulnerableResult.distSq < minDistThreatToFragSq) {
+                                minDistThreatToFragSq = vulnerableResult.distSq;
+                                nearestThreatToMyFragmentsCenter = otherCenter;
+                                targetVulnerableCell = vulnerableResult.cell;
                             }
                         }
                     }
-
-                        // Check Threats to Own Fragments (if I am split)
-                        if (ownSplitState) {
-                            const vulnerableResult = this.findNearestVulnerableCellToThreat(otherCenter, largestOtherCellMass);
-                            if (vulnerableResult.cell) {
-                                const otherLargestRadius = Math.sqrt(largestOtherCellMass / Math.PI);
-                                const threatToFragDistSq = (otherLargestRadius * 1.5)**2;
-                                if (vulnerableResult.distSq < threatToFragDistSq && vulnerableResult.distSq < minDistThreatToFragSq) {
-                                    minDistThreatToFragSq = vulnerableResult.distSq;
-                                    nearestThreatToMyFragmentsCenter = otherCenter;
-                                    targetVulnerableCell = vulnerableResult.cell;
-                                }
-                            }
-                        }
-                } // End conditional check (if virusToFeed == null)
+                } // End conditional check (if no feed and no close threat)
 
             } // --- End Player 'other' in view ---
         } // --- End Perception Loop (Players) ---
 
-
-        // --- Check Food (Simplified) ---
-        if (virusToFeed == null && nearestPreyPlayerCenter == null && nearestOpportunityTarget == null) { // Only check food if no major targets
-            for (const food of foods) { /* ... [existing food check logic] ... */
-                    const dSq = distanceSq(largestOwnCell.x, largestOwnCell.y, food.x, food.y); // Use largest cell
-                    if (dSq < viewRadiusSq && dSq < minDistFoodSq) {
-                        minDistFoodSq = dSq;
-                        nearestFood = food;
-                    }
+        // --- Check Food (Only if safe and no better targets) ---
+        if (virusToFeed == null && nearestThreatPlayerCenter == null && nearestPreyPlayerCenter == null && nearestOpportunityTarget == null) {
+            for (const food of foods) {
+                 const dSq = distanceSq(largestOwnCell.x, largestOwnCell.y, food.x, food.y); // Use largest cell
+                 if (dSq < viewRadiusSq && dSq < minDistFoodSq) {
+                     minDistFoodSq = dSq;
+                     nearestFood = food;
+                 }
             }
         }
 
-        // --- Check Viruses (for Hiding/Avoiding, independent of feeding decision) ---
-            if (isBigEnoughToSplit) { // Check for dangerous viruses
-                for (const virus of viruses) {
-                    // Don't avoid the virus we intend to feed!
-                    if (virus === virusToFeed) continue;
-
-                    const dSq = distanceSq(largestOwnCell.x, largestOwnCell.y, virus.x, virus.y); // Use largest cell
-                    if (dSq < minDistDangerousVirusSq) {
-                        // More precise danger check: Is the virus *really* close to the edge?
-                        const dangerDistSq = (largestOwnCellRadius + virus.radius + 10)**2; // Small buffer
-                        if (dSq < dangerDistSq) {
-                            minDistDangerousVirusSq = dSq;
-                            nearestDangerousVirus = virus;
-                            // console.log(`${this.name} identified dangerous virus at ${virus.x.toFixed(0)}`);
-                        }
-                        // Could add path prediction check here too
-                    }
-                }
-            } else { // Check for safe viruses to hide near (only relevant if fleeing)
-                for (const virus of viruses) {
-                    const dSq = distanceSq(center.x, center.y, virus.x, virus.y); // Use center of mass for general hiding location
-                    if (dSq < viewRadiusSq * 0.8 && dSq < minDistSafeVirusSq) {
+        // --- Check Viruses (for Hiding/Avoiding, independent of feeding) ---
+         if (isBigEnoughToSplit) {
+             for (const virus of viruses) {
+                 if (virus === virusToFeed) continue;
+                 const dSq = distanceSq(largestOwnCell.x, largestOwnCell.y, virus.x, virus.y);
+                 if (dSq < minDistDangerousVirusSq) {
+                     const dangerDistSq = (largestOwnCellRadius + virus.radius + 10)**2;
+                     if (dSq < dangerDistSq) {
+                         minDistDangerousVirusSq = dSq;
+                         nearestDangerousVirus = virus;
+                     }
+                 }
+             }
+         } else if (foundUnblockedThreat) { // *** Only look for hiding spots if actually fleeing ***
+             for (const virus of viruses) {
+                 const dSq = distanceSq(center.x, center.y, virus.x, virus.y);
+                 if (dSq < viewRadiusSq * 0.8 && dSq < minDistSafeVirusSq) {
+                    // *** Safety check: Ensure own largest cell isn't too close to the potential hiding spot ***
+                     const dSqLargestToSafeVirus = distanceSq(largestOwnCell.x, largestOwnCell.y, virus.x, virus.y);
+                     const minHidingDistSq = (largestOwnCellRadius + virus.radius + 5)**2; // Small buffer
+                     if (dSqLargestToSafeVirus > minHidingDistSq) {
                         minDistSafeVirusSq = dSq;
                         nearestSafeVirus = virus;
-                    }
-                }
-            }
+                     }
+                 }
+             }
+         }
 
 
         // --- FINAL DECISION MAKING (Priority Order) ---
 
-        // 1. Fleeing (Only if UNBLOCKED threat exists)
-        if (nearestThreatPlayerCenter) {
-            // Check if hiding near 'nearestSafeVirus' is viable (from fleeing logic)
+        // 1. Fleeing (Highest priority if an UNBLOCKED threat was deemed close by center OR edge)
+        if (nearestThreatPlayerCenter) { // This is now set if EITHER edge is close OR center is closest among edge-threats
             let fleeTargetX, fleeTargetY;
             let decidedToHide = false;
-            if (isSmallEnoughToHide && nearestSafeVirus) { /* ... [Hiding logic during flee] ... */
+
+            // Try hiding behind the nearest *safe* virus first
+            if (isSmallEnoughToHide && nearestSafeVirus) {
                 const distToVirusSq = distanceSq(center.x, center.y, nearestSafeVirus.x, nearestSafeVirus.y);
-                const distToThreatSq = distanceSq(center.x, center.y, nearestThreatPlayerCenter.x, nearestThreatPlayerCenter.y);
-                const minimumHidingDistSq = (largestOwnCellRadius + virusRadius + 10)**2;
-                if (distToVirusSq < distToThreatSq * 0.4 && distToVirusSq > minimumHidingDistSq) { // Adjust factor?
-                        const vX = nearestSafeVirus.x - center.x;
-                        const vY = nearestSafeVirus.y - center.y;
-                        const tX = center.x - nearestThreatPlayerCenter.x;
-                        const tY = center.y - nearestThreatPlayerCenter.y;
-                        if (vX * tX + vY * tY > 0) { // Virus roughly away from threat?
-                        this.aiTarget = { x: nearestSafeVirus.x, y: nearestSafeVirus.y, type: 'hiding' };
-                        // console.log(`--- ${this.name} Flee Decision: HIDING near virus ---`);
-                        return; // Hiding is the decision
-                        }
-                }
+                // Ensure the threat we are fleeing from (nearestThreatPlayerCenter) is further away than the virus
+                 const distToThreatSq = distanceSq(center.x, center.y, nearestThreatPlayerCenter.x, nearestThreatPlayerCenter.y); // This is minDistThreatSq
+
+                 // Condition: Virus is closer than threat AND virus is generally "behind" us relative to the threat
+                 if (distToVirusSq < distToThreatSq) {
+                     const vX = nearestSafeVirus.x - center.x; // Vector from AI to Virus
+                     const vY = nearestSafeVirus.y - center.y;
+                     const tX = center.x - nearestThreatPlayerCenter.x; // Vector from Threat to AI (direction of flee)
+                     const tY = center.y - nearestThreatPlayerCenter.y;
+                     // Check dot product: if positive, vectors are generally in the same direction (virus is away from threat)
+                     if (vX * tX + vY * tY > 0) {
+                         // Check if virus is not *too* far - maybe within 60% of threat distance?
+                         if (distToVirusSq < distToThreatSq * 0.6) {
+                            this.aiTarget = { x: nearestSafeVirus.x, y: nearestSafeVirus.y, type: 'hiding' };
+                            // console.log(`--- ${this.name} Flee Decision: HIDING near virus from ${nearestThreatPlayerCenter.x.toFixed(0)}---`);
+                             return; // Hiding is the decision
+                         }
+                     }
+                 }
             }
 
-            // Default Flee (if not hiding)
+            // Default Flee (if not hiding) - Flee from the CENTER of the nearest threat
             const fleeAngle = Math.atan2(center.y - nearestThreatPlayerCenter.y, center.x - nearestThreatPlayerCenter.x);
-            const fleeDistance = viewRadius * 1.1; // Flee further
+            const fleeDistance = viewRadius * 1.1;
             fleeTargetX = center.x + Math.cos(fleeAngle) * fleeDistance;
             fleeTargetY = center.y + Math.sin(fleeAngle) * fleeDistance;
-            fleeTargetX = Math.max(-canvas.width*0.2, Math.min(fleeTargetX, canvas.width*1.2)); // Allow going slightly off-screen
-            fleeTargetY = Math.max(-canvas.height*0.2, Math.min(fleeTargetY, canvas.height*1.2));
+            // Clamp flee target to be slightly outside canvas bounds if necessary
+            fleeTargetX = Math.max(-canvas.width * 0.1, Math.min(fleeTargetX, canvas.width * 1.1));
+            fleeTargetY = Math.max(-canvas.height * 0.1, Math.min(fleeTargetY, canvas.height * 1.1));
+
             this.aiTarget = { x: fleeTargetX, y: fleeTargetY, type: 'fleeing' };
-            // console.log(`--- ${this.name} Flee Decision: RUNNING from unblocked threat ---`);
+            // console.log(`--- ${this.name} Flee Decision: RUNNING from threat at ${nearestThreatPlayerCenter.x.toFixed(0)} ---`);
             return; // Fleeing is the decision
         }
 
-        // 2. Avoid Dangerous Virus (If I'm big enough to split and virus is too close)
+        // 2. Avoid Dangerous Virus (If large and virus edge is too close)
         if (nearestDangerousVirus) {
-            // Calculate avoidance target away from the dangerous virus
             const avoidAngle = Math.atan2(largestOwnCell.y - nearestDangerousVirus.y, largestOwnCell.x - nearestDangerousVirus.x);
-            const avoidDistance = largestOwnCellRadius * 1.5; // Moderate distance
+            const avoidDistance = largestOwnCellRadius * 1.5;
             let targetX = largestOwnCell.x + Math.cos(avoidAngle) * avoidDistance;
             let targetY = largestOwnCell.y + Math.sin(avoidAngle) * avoidDistance;
-            targetX = Math.max(0, Math.min(targetX, canvas.width));
-            targetY = Math.max(0, Math.min(targetY, canvas.height));
+            targetX = Math.max(largestOwnCellRadius, Math.min(targetX, canvas.width - largestOwnCellRadius)); // Stay within bounds
+            targetY = Math.max(largestOwnCellRadius, Math.min(targetY, canvas.height - largestOwnCellRadius));
             this.aiTarget = { x: targetX, y: targetY, type: 'avoidingVirus' };
             // console.log(`--- ${this.name} Decision: AVOIDING dangerous virus ---`);
-            return; // Avoiding virus is the decision
+            return;
         }
 
-        // 3. *** Execute Virus Feeding *** (If a target and virus were selected)
+        // 3. Execute Virus Feeding (If conditions met earlier)
         if (virusToFeed && targetToFeedVirus) {
-            console.log(`--- ${this.name} Decision: FEEDING virus at (${virusToFeed.x.toFixed(0)}) towards target (${targetToFeedVirus.x.toFixed(0)}) ${isHighPriorityFeed ? '(HIGH PRIORITY)' : ''} ---`);
-
-            // Check mass again right before execution (could have changed)
-            if (largestOwnCell.mass >= MIN_MASS_TO_FEED_VIRUS) {
-                virusToFeed.triggerFlash();
-                // Create pellet animation
-                const pelletColor = this.color;
-                feedPellets.push(new FeedPellet(largestOwnCell.x, largestOwnCell.y, virusToFeed.x, virusToFeed.y, PELLET_RADIUS, pelletColor));
-
-                // Apply mass cost
-                largestOwnCell.mass -= VIRUS_FEED_MASS_COST;
-                largestOwnCell.setRadiusFromMass();
-                this.calculateTotalMass();
-
-                // Increment virus feed count
-                virusToFeed.feedCount++;
-
-                // Check for virus split and remove if necessary
-                if (virusToFeed.feedCount >= VIRUS_MAX_FEED_COUNT) {
-                    if (virusToFeed.splitTowards(targetToFeedVirus.x, targetToFeedVirus.y)) {
-                            const index = viruses.indexOf(virusToFeed);
-                            if (index > -1) viruses.splice(index, 1);
-                            else console.error("Fed virus not found for removal!");
-                    }
-                }
-            } else {
-                    console.log(`Feed EXECUTION ABORTED [${this.name}]: Mass too low at execution time.`);
-            }
-
-            // Force immediate re-evaluation next frame
-            this.aiTarget = null; // Clear any previous movement target
-            this.aiUpdateCooldown = 0; // Trigger findAITarget next frame
-            return; // Feeding action executed (or attempted)
+            // ... [existing feed execution logic - no changes needed here] ...
+             console.log(`--- ${this.name} Decision: FEEDING virus at (${virusToFeed.x.toFixed(0)}) towards target (${targetToFeedVirus.x.toFixed(0)}) ${isHighPriorityFeed ? '(HIGH PRIORITY)' : ''} ---`);
+             if (largestOwnCell.mass >= MIN_MASS_TO_FEED_VIRUS) {
+                 virusToFeed.triggerFlash();
+                 feedPellets.push(new FeedPellet(largestOwnCell.x, largestOwnCell.y, virusToFeed.x, virusToFeed.y, PELLET_RADIUS, this.color));
+                 largestOwnCell.mass -= VIRUS_FEED_MASS_COST;
+                 largestOwnCell.setRadiusFromMass();
+                 this.calculateTotalMass();
+                 virusToFeed.feedCount++;
+                 if (virusToFeed.feedCount >= VIRUS_MAX_FEED_COUNT) {
+                     if (virusToFeed.splitTowards(targetToFeedVirus.x, targetToFeedVirus.y)) {
+                             const index = viruses.indexOf(virusToFeed);
+                             if (index > -1) viruses.splice(index, 1);
+                             else console.error("Fed virus not found for removal!");
+                     }
+                 }
+             } else {
+                 console.log(`Feed EXECUTION ABORTED [${this.name}]: Mass too low at execution time.`);
+             }
+             this.aiTarget = null;
+             this.aiUpdateCooldown = 0;
+             return;
         }
 
-        // 4. Protect Fragments (If split and fragments threatened)
+        // 4. Protect Fragments
         if (ownSplitState && nearestThreatToMyFragmentsCenter && targetVulnerableCell) {
             this.aiTarget = { x: targetVulnerableCell.x, y: targetVulnerableCell.y, type: 'protecting' };
             // console.log(`--- ${this.name} Decision: PROTECTING fragment ---`);
             return;
         }
 
-        // 5. Hunt Opportunity Target (Split enemy fragments)
+        // 5. Hunt Opportunity Target
         if (nearestOpportunityTarget) {
-                this.aiTarget = { x: nearestOpportunityTarget.x, y: nearestOpportunityTarget.y, type: 'opportunisticHunt' };
-                // console.log(`--- ${this.name} Decision: OPPORTUNISTIC HUNT ---`);
-                return;
+            this.aiTarget = { x: nearestOpportunityTarget.x, y: nearestOpportunityTarget.y, type: 'opportunisticHunt' };
+            // console.log(`--- ${this.name} Decision: OPPORTUNISTIC HUNT ---`);
+            return;
         }
 
         // 6. Hunt Regular Prey
@@ -10659,32 +10650,27 @@ class LogicalPlayer {
             return;
         }
 
-        // 8. Assist Merging (If split and no other pressing action)
+        // 8. Assist Merging
         if (ownSplitState && this.cells.length > 1) {
-            const ownCenter = this.findCenterOfMass(); // Recalculate or use 'center'
-            this.aiTarget = { x: center.x, y: center.y, type: 'mergingAssist' };
-                // console.log(`--- ${this.name} Decision: MERGING ASSIST ---`);
+            const ownCenter = this.findCenterOfMass();
+            this.aiTarget = { x: ownCenter.x, y: ownCenter.y, type: 'mergingAssist' }; // Target own center
+            // console.log(`--- ${this.name} Decision: MERGING ASSIST ---`);
             return;
         }
 
-        // 9. Wander (Default)
+        // 9. Wander
+        // ...(existing wander logic)...
         const targetDistSq = this.aiTarget ? distanceSq(center.x, center.y, this.aiTarget.x, this.aiTarget.y) : Infinity;
-        // Only set a new wander target if no target exists, or current target is wander and we are close
-        if (!this.aiTarget || (this.aiTarget.type === 'wandering' && targetDistSq < (150*150))) { // Increased wander distance threshold
+        if (!this.aiTarget || (this.aiTarget.type === 'wandering' && targetDistSq < (150*150))) {
                 const wanderAngle = Math.random() * Math.PI * 2;
                 const wanderDist = 200 + Math.random() * 300;
                 let wanderX = center.x + Math.cos(wanderAngle) * wanderDist;
                 let wanderY = center.y + Math.sin(wanderAngle) * wanderDist;
-                wanderX = Math.max(50, Math.min(wanderX, canvas.width - 50)); // Keep wander target well within bounds
+                wanderX = Math.max(50, Math.min(wanderX, canvas.width - 50));
                 wanderY = Math.max(50, Math.min(wanderY, canvas.height - 50));
                 this.aiTarget = { x: wanderX, y: wanderY, type: 'wandering' };
-                // console.log(`--- ${this.name} Decision: WANDERING ---`); // Reduce wander log spam
-        } else if (this.aiTarget) {
-            // Keep existing target if it's not 'wandering' or if it is 'wandering' but still far away
-                // console.log(`--- ${this.name} Decision: Continuing Target (${this.aiTarget.type}) ---`);
-        } else {
-                // console.log(`--- ${this.name} Decision: NO TARGET (Should wander next?) ---`); // Should not happen often
         }
+        // console.log(`--- ${this.name} Decision: WANDERING/Continuing (${this.aiTarget?.type}) ---`);
 
     } // --- End of findAITarget ---
 
@@ -11622,11 +11608,5 @@ function gameLoop(timestamp) {
 window.addEventListener('resize', resizeCanvas);
 
 // --- Initialization ---
-if (nameList && nameList.length > 0) {
-    shuffleArray(nameList);
-} else {
-    console.warn("Embedded name list is empty. Using fallback.");
-    nameList = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta", "Iota", "Kappa"];
-    shuffleArray(nameList);
-}
+shuffleArray(nameList);
 document.addEventListener('DOMContentLoaded', initGame);
