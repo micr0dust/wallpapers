@@ -1,0 +1,33 @@
+{
+    "file": "index.html",
+    "title": "AI Tic-Tac-Toe Tree Visualization (DFS Scrolling)",
+    "type": "web",
+    "description": "Animated visualization of two AI playing Tic-Tac-Toe using Alpha-Beta Minimax, showing the DFS tree traversal with panning. Control speed and highlight color.",
+    "preview": "preview.jpg",
+    "supportsaudioprocessing": false,
+    "general": {
+      "properties": {
+        "dfsSpeed": {
+          "type": "slider",
+          "text": "DFS Animation Speed (ms delay per step)",
+          "min": 5,
+          "max": 300,
+          "step": 5,
+          "precision": 0,
+          "value": 40
+        },
+        "themeColor": {
+          "type": "color",
+          "text": "Highlight Color (Active Node)",
+          "format": "rgb",
+          "value": "0.596 0.765 0.475"
+        },
+        "pathColor": {
+           "type": "color",
+           "text": "Path Color (Non-active path nodes)",
+           "format": "rgb",
+           "value": "0.380 0.686 0.937"
+        }
+      }
+    }
+  }

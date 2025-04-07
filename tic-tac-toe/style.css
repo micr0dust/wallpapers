@@ -1,0 +1,85 @@
+:root {
+    /* Colors */
+    --o-color: #61afef;
+    --x-color: #e06c75;
+    --line-color: #5c6370; /* Tree lines */
+    --dot-color: #4b5263;
+    /* Active/Path colors set by JS/WE */
+    --node-bg-color: #353a45; /* Mini-board node background */
+    --pruned-dot-color: #e06c75;
+    --bg-color: #282c34; /* Body background */
+    --text-color: #abb2bf;
+    --bg-board-line-color: rgba(92, 99, 112, 0.2); /* Transparent background grid lines */
+    --bg-board-mark-color: rgba(200, 200, 200, 0.15); /* Very transparent marks */
+
+    /* Tree Layout */
+    --node-size: 45;
+    --mini-cell-size: calc(var(--node-size) / 3);
+    --dot-radius: 3;
+    --level-height: 65;
+    --sibling-spacing: 15;
+    --target-center-x-ratio: 0.5;
+}
+
+body {
+    margin: 0;
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    height: 100vh;
+    width: 100vw;
+    overflow: hidden; /* Prevent scrollbars */
+    position: relative; /* For absolute positioning children */
+}
+
+/* Background Board Styling */
+.background-board {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    grid-template-rows: repeat(3, 1fr);
+    /* Gap removed, lines added via cell borders */
+    padding: 3%; /* Slightly less padding */
+    box-sizing: border-box;
+    z-index: 1; /* Behind the canvas */
+}
+
+.background-board .bg-cell {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-size: 25vmin; /* Adjusted font size */
+    font-weight: bold;
+    color: var(--bg-board-mark-color);
+    line-height: 1;
+    border: 5px solid var(--bg-board-line-color); /* Use border for grid lines */
+    box-sizing: border-box;
+
+    /* Remove borders at the edges of the grid */
+    border-top: none;
+    border-left: none;
+}
+/* Add back borders for the first row/column */
+.background-board .bg-cell:nth-child(-n+3) { /* First row */
+     border-top: 5px solid var(--bg-board-line-color);
+}
+.background-board .bg-cell:nth-child(3n+1) { /* First column */
+      border-left: 5px solid var(--bg-board-line-color);
+}
+
+/* Full Screen Canvas Styling */
+canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%; /* Fill viewport width */
+    height: 100%; /* Fill viewport height */
+    background-color: transparent; /* Canvas itself is transparent */
+    z-index: 10; /* Above the background board */
+    display: block; /* Remove potential extra space */
+}
+
+/* Removed .visualization-canvas and #status-overlay styles */
