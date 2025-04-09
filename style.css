@@ -1,0 +1,74 @@
+body {
+    font-family: Arial, sans-serif;
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    background-color: #f4f4f4;
+}
+.container {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 20px;
+    padding: 20px;
+}
+.wallpaper {
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    overflow: hidden;
+    background-color: #fff;
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
+    display: flex;
+    flex-direction: column;
+}
+.wallpaper:hover {
+    transform: scale(1.05);
+    box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+}
+.wallpaper-image-link img {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+.wallpaper-info {
+    padding: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-grow: 1;
+}
+.wallpaper-info h3 {
+    margin: 0;
+    font-size: 1rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-right: 8px;
+}
+.wallpaper-title-link {
+    text-decoration: none;
+    color: inherit;
+    min-width: 0;
+}
+ .wallpaper-title-link:hover h3 {
+     color: #007bff;
+ }
+.github-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: #333;
+    line-height: 0; /* Important to prevent extra space below the img */
+}
+/* --- CSS Change Here --- */
+.github-link img { /* Changed selector from svg to img */
+    width: 20px; /* Icon size */
+    height: 20px;
+    /* fill: currentColor; Removed, doesn't apply directly to img */
+    transition: opacity 0.2s ease; /* Optional: slight fade effect on hover */
+    vertical-align: middle; /* Helps align if line-height isn't 0 */
+}
+/* --- End CSS Change --- */
+.github-link:hover {
+    color: #007bff; /* This still changes link color */
+    opacity: 0.7; /* Example: Dim the icon slightly on hover */
+}
