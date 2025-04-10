@@ -19,7 +19,7 @@ let nextPlayerId = 0; // Simple ID generator for LogicalPlayers
 // --- Configuration Constants (Agar.io Specific) ---
 const MIN_ACTIVE_PLAYERS = 20;
 const initialPlayerCount = MIN_ACTIVE_PLAYERS;
-const maxFoodCount = 120;
+const maxFoodCount = 300;
 const foodRadius = 3;
 const initialVirusCount = 5;
 const virusRadius = 35;
@@ -27,7 +27,7 @@ const virusColor = '#33ff33';
 const virusSpikeCount = 10;
 const virusSplitMassThresholdMultiplier = 1.15;
 const playerSplitPieces = 7;
-const playerSplitMinMassPerPiece = 100;
+const playerSplitMinMassPerPiece = 300;
 const playerSplitBurstSpeed = 1;
 const respawnDelay = 5000;
 const MAX_DELTA_TIME = 50;
@@ -49,7 +49,9 @@ const VIRUS_MAX_FEED_COUNT = 7;
 const FEED_VIRUS_RANGE_FACTOR = 0.8;
 const FEED_TARGET_MAX_MASS_FACTOR = 100;
 const FEED_EDGE_PROXIMITY_THRESHOLD = 50;
-const PELLET_SPEED = 15;
+const AI_FEED_VIRUS_PROBABILITY = 0.3;
+const AI_FEED_VIRUS_COOLDOWN_DURATION = 20000;
+const PELLET_SPEED = 10;
 const PELLET_LIFESPAN = 300;
 const PELLET_RADIUS = 15;
 const MAX_SPAWN_ATTEMPTS = 100;
@@ -61,6 +63,7 @@ const MAP_COVERAGE_RADIUS_FACTOR = 0.85;
 const INTRA_PLAYER_COLLISION_ENABLED = true; // Keep this if you still want the logic below
 const FADE_DURATION = 2000;
 const BLACK_SCREEN_DURATION = 500;
+let DEBUG_DRAW_AI_VIEW = false;
 // const MINIMUM_CELL_MASS_AFTER_SHRINK = 10; // Add if using intra-player collision shrink
 // const INTRA_PLAYER_SHRINK_RATE = 0.005;    // Add if using intra-player collision shrink
 
@@ -275,54 +278,49 @@ class FeedPellet {
         this.y = startY;
         this.radius = radius;
         this.color = color;
-        this.lifeTimer = PELLET_LIFESPAN;
+        // this.lifeTimer = PELLET_LIFESPAN; // REMOVED: Fixed lifespan
 
         const dx = targetX - startX;
         const dy = targetY - startY;
         const dist = Math.sqrt(dx * dx + dy * dy);
 
+        // Calculate time to reach target based on speed
+        // Assuming PELLET_SPEED is pixels per 16.67ms tick
+        const timeToTargetMs = dist > 0.1 ? (dist / PELLET_SPEED) * 16.67 : 100; // Add a small minimum time
+        this.lifeTimer = timeToTargetMs; // ADDED: Dynamic lifespan
+
         if (dist > 0.1) {
             this.vx = (dx / dist) * PELLET_SPEED;
             this.vy = (dy / dist) * PELLET_SPEED;
         } else {
+            // Start with minimal velocity if already at target (shouldn't happen often)
             this.vx = (Math.random() - 0.5) * PELLET_SPEED * 0.1;
             this.vy = (Math.random() - 0.5) * PELLET_SPEED * 0.1;
+            this.lifeTimer = 100; // Give it a very short lifespan if starting at target
         }
     }
 
     update(deltaTime) {
+        // Check if lifespan expired before moving
+        this.lifeTimer -= deltaTime;
+        if (this.lifeTimer <= 0) {
+            return false; // Pellet expires
+        }
+
         const timeFactor = deltaTime / 16.67;
         this.x += this.vx * timeFactor;
         this.y += this.vy * timeFactor;
-        this.lifeTimer -= deltaTime;
-        return this.lifeTimer > 0;
+
+        // Return true if still alive
+        return true;
     }
 
     draw() {
-        const opacity = Math.max(0, Math.min(1, this.lifeTimer / PELLET_LIFESPAN));
-        let drawColor = this.color;
-        try {
-            if (this.color.startsWith('#') && this.color.length === 7) {
-                 const alphaHex = Math.floor(opacity * 255).toString(16).padStart(2, '0');
-                 drawColor = this.color + alphaHex;
-                 ctx.fillStyle = drawColor;
-            } else {
-                 // Fallback for non-hex colors or if alpha fails
-                 ctx.globalAlpha = opacity;
-                 ctx.fillStyle = this.color;
-            }
-
-            ctx.beginPath();
-            ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.closePath();
-
-        } catch (e) {
-             console.error("Error drawing pellet:", e, "Color:", this.color, "Opacity:", opacity);
-        } finally {
-            // Always reset global alpha if it was potentially changed
-            ctx.globalAlpha = 1.0;
-        }
+        ctx.fillStyle = this.color;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.closePath();
     }
 }
 
@@ -340,6 +338,8 @@ class LogicalPlayer {
         this.aiTarget = null;
         this.aiUpdateCooldown = Math.random() * 200;
         this.aiUpdateInterval = 200 + Math.random() * 150;
+        this.aiFeedVirusCooldown = 0
+        this.currentViewRadius = 0;
 
         this.createInitialCell();
     }
@@ -484,13 +484,16 @@ class LogicalPlayer {
         }
 
         const center = this.findCenterOfMass();
-        const viewRadius = 300 + Math.log1p(this.totalMass) * 50; // Dynamic view radius based on mass
+        const viewRadius = 50 + Math.sqrt(this.totalMass*5); // Dynamic view radius based on mass
+        this.currentViewRadius = viewRadius;
         const viewRadiusSq = viewRadius * viewRadius;
 
         // Perception variables
         let nearestFood = null, minDistFoodSq = viewRadiusSq * 1.2;
         let nearestThreatPlayerCenter = null, minDistThreatSq = Infinity;
-        let nearestPreyPlayerCenter = null, minDistPreySq = viewRadiusSq;
+        // let nearestPreyPlayerCenter = null, minDistPreySq = viewRadiusSq; // REMOVED - Replaced by targetLargestPreyCell logic
+        let targetLargestPreyCell = null; // ADDED: Stores the best eligible prey cell
+        let maxEligiblePreyMass = 0;      // ADDED: Tracks the mass of the best eligible prey cell
         let nearestSafeVirus = null, minDistSafeVirusSq = viewRadiusSq * 0.5;
         let nearestOpportunityTarget = null, minDistOpportunitySq = viewRadiusSq;
         let nearestThreatToMyFragmentsCenter = null, minDistThreatToFragSq = viewRadiusSq;
@@ -521,14 +524,17 @@ class LogicalPlayer {
             const dSqToCenter = distanceSq(center.x, center.y, otherCenter.x, otherCenter.y);
 
             if (dSqToCenter < viewRadiusSq) { // Player is in view
-                const largestOtherCellMass = other.findLargestCellMass();
-                const otherLargestRadius = other.findLargestCellRadius();
+                const largestOtherCell = other.getLargestCell(); // Get the other player's largest cell
+                if (!largestOtherCell) continue; // Skip if other player has no cells somehow
+
+                const largestOtherCellMass = largestOtherCell.mass; // Use specific cell mass
+                const otherLargestRadius = largestOtherCell.radius; // Use specific cell radius
                 const otherSplitState = other.isSplitState();
                 let isVirusBlockingThisThreat = false;
                 let specificBlockingVirus = null;
 
                 // --- A: Threat Assessment ---
-                if (largestOwnCellMass > 0 && largestOtherCellMass / largestOwnCellMass > 1.25) { // Is 'other' a threat?
+                if (largestOwnCellMass > 0 && largestOtherCellMass / largestOwnCellMass > 1.25) { // Is 'other' a threat? (Based on largest cells)
                     const isThreatBigEnoughToSplit = largestOtherCellMass > canBeSplitMassThreshold * 1.1;
 
                     // A1: Check for Blocking Virus (if hiding is viable)
@@ -558,20 +564,25 @@ class LogicalPlayer {
                     }
 
                     // A2: Evaluate Flee Distance (if NOT blocked)
+                    // Use distance between largest cells for flee trigger
+                    const dSqLargestCells = distanceSq(largestOwnCell.x, largestOwnCell.y, largestOtherCell.x, largestOtherCell.y);
                     const edgeTriggerDistSq = (largestOwnCellRadius + otherLargestRadius + FLEE_EDGE_DISTANCE_THRESHOLD) ** 2;
                     if (!isVirusBlockingThisThreat) {
                          foundUnblockedThreat = true;
-                         if (dSqToCenter < edgeTriggerDistSq && dSqToCenter < minDistThreatSq) {
-                            minDistThreatSq = dSqToCenter;
-                            nearestThreatPlayerCenter = otherCenter;
+                         // Trigger flee based on distance between largest cells or centers, whichever is smaller
+                         const effectiveThreatDistSq = Math.min(dSqLargestCells, dSqToCenter);
+                         if (effectiveThreatDistSq < edgeTriggerDistSq && effectiveThreatDistSq < minDistThreatSq) {
+                            minDistThreatSq = effectiveThreatDistSq;
+                            nearestThreatPlayerCenter = otherCenter; // Still flee from center for simplicity
                          }
                     }
 
                     // --- B: Feeding Opportunity Assessment ---
                     const canFeed = AI_CAN_FEED_VIRUS && largestOwnCellMass >= MIN_MASS_TO_FEED_VIRUS && !ownSplitState;
+                    // Use distance between largest cells for feed trigger proximity
                     const feedEdgeTriggerDistSq = (largestOwnCellRadius + otherLargestRadius + FEED_EDGE_PROXIMITY_THRESHOLD) ** 2;
-                    const isInCenterRange = dSqToCenter < minDistToFeedableTargetSq;
-                    const areEdgesClose = dSqToCenter < feedEdgeTriggerDistSq;
+                    const isInCenterRange = dSqToCenter < minDistToFeedableTargetSq; // Keep center range check
+                    const areEdgesClose = dSqLargestCells < feedEdgeTriggerDistSq; // Check edge proximity
                     const isValidFeedTarget = largestOtherCellMass > canBeSplitMassThreshold * 1.1 &&
                                         largestOtherCellMass > largestOwnCellMass * 0.7 &&
                                         largestOtherCellMass < largestOwnCellMass * FEED_TARGET_MAX_MASS_FACTOR &&
@@ -599,20 +610,48 @@ class LogicalPlayer {
                                 const isInRangeToShoot = dSqLargestToVirus < viewRadiusSq * (FEED_VIRUS_RANGE_FACTOR**2) * 0.9;
 
                                 if (dSqLargestToVirus > minSafeDistSq && isInRangeToShoot) { // Safe & in range
-                                    // Check if virus is roughly between AI and Target, and Target edge is near virus
-                                    const Ax = center.x, Ay = center.y, Tx = otherCenter.x, Ty = otherCenter.y, Vx = virus.x, Vy = virus.y;
-                                    let distSqToLineSegment = Infinity; const lineLenSqReg = (Tx-Ax)**2 + (Ty-Ay)**2;
-                                    if (lineLenSqReg > 0.01) {
-                                        const tReg = ((Vx - Ax) * (Tx - Ax) + (Vy - Ay) * (Ty - Ay)) / lineLenSqReg;
-                                        if (tReg >= -0.1 && tReg <= 1.1) distSqToLineSegment = distanceSq(Vx, Vy, Ax + tReg * (Tx - Ax), Ay + tReg * (Ty - Ay));
-                                        else distSqToLineSegment = Math.min(distanceSq(Vx,Vy,Ax,Ay), distanceSq(Vx,Vy,Tx,Ty));
-                                    } else { distSqToLineSegment = distanceSq(Vx, Vy, Ax, Ay);}
+                                    // --- NEW: Check if the line segment from AI center to Target center intersects the virus circle ---
+                                    const Ax = center.x, Ay = center.y;
+                                    const Tx = otherCenter.x, Ty = otherCenter.y;
+                                    const Vx = virus.x, Vy = virus.y;
+                                    const virusRadiusSq = virus.radius * virus.radius;
+                                    let intersectsVirus = false;
 
-                                    const isVirusOnLine = distSqToLineSegment < (virus.radius * 2.5) ** 2;
-                                    const distSqTargetToVirus = distanceSq(Tx, Ty, Vx, Vy);
-                                    const isTargetEdgeNear = distSqTargetToVirus < (virus.radius + otherLargestRadius * 0.8) ** 2;
+                                    const dx = Tx - Ax;
+                                    const dy = Ty - Ay;
+                                    const segmentLenSq = dx * dx + dy * dy;
 
-                                    if (isVirusOnLine && isTargetEdgeNear && dSqToCenter < minDistToFeedableTargetSq) {
+                                    if (segmentLenSq < 0.001) { // AI and Target are basically at the same point
+                                        intersectsVirus = distanceSq(Ax, Ay, Vx, Vy) <= virusRadiusSq;
+                                    } else {
+                                        // Project virus center onto the line defined by A and T
+                                        const t = ((Vx - Ax) * dx + (Vy - Ay) * dy) / segmentLenSq;
+
+                                        let closestX, closestY;
+                                        if (t < 0) { // Closest point on line is A
+                                            closestX = Ax; closestY = Ay;
+                                        } else if (t > 1) { // Closest point on line is T
+                                            closestX = Tx; closestY = Ty;
+                                        } else { // Closest point is on the segment AT
+                                            closestX = Ax + t * dx;
+                                            closestY = Ay + t * dy;
+                                        }
+
+                                        // Check distance from virus center to the closest point on the segment
+                                        const distSqToClosestPointOnSegment = distanceSq(Vx, Vy, closestX, closestY);
+
+                                        if (distSqToClosestPointOnSegment <= virusRadiusSq) {
+                                            intersectsVirus = true;
+                                        }
+                                    }
+                                    // --- END NEW ---
+
+                                    // Check distance from target's *largest cell* to virus (Keep this check)
+                                    const distSqTargetLargestToVirus = distanceSq(largestOtherCell.x, largestOtherCell.y, Vx, Vy);
+                                    const isTargetEdgeNear = distSqTargetLargestToVirus < (virus.radius + otherLargestRadius * 0.8) ** 2;
+
+                                    // Use the new intersection check instead of isVirusOnLine
+                                    if (intersectsVirus && isTargetEdgeNear && dSqToCenter < minDistToFeedableTargetSq) {
                                         targetToFeedVirus = otherCenter;
                                         virusToFeed = virus;
                                         minDistToFeedableTargetSq = dSqToCenter;
@@ -626,17 +665,25 @@ class LogicalPlayer {
 
                 // --- C: Other Assessments (Prey, Opportunity, Fragment Threats) ---
                 if (virusToFeed == null && nearestThreatPlayerCenter == null) { // Only if not fleeing or feeding
-                    // Check Prey
-                    if (largestOwnCellMass > largestOtherCellMass * 1.3 && dSqToCenter < minDistPreySq) {
-                        minDistPreySq = dSqToCenter;
-                        nearestPreyPlayerCenter = otherCenter;
+
+                    // MODIFIED: Check Prey - Target largest cell < 70% own mass
+                    if (largestOwnCellMass > largestOtherCellMass / 0.7) { // Check if other's largest cell is eligible prey
+                        const dSqToLargestOtherCell = distanceSq(largestOwnCell.x, largestOwnCell.y, largestOtherCell.x, largestOtherCell.y);
+                        if (dSqToLargestOtherCell < viewRadiusSq*2) { // Check if the specific cell is in view range
+                            if (largestOtherCellMass > maxEligiblePreyMass) { // Is this the largest eligible prey cell found so far?
+                                maxEligiblePreyMass = largestOtherCellMass;
+                                targetLargestPreyCell = largestOtherCell; // Target this specific cell
+                            }
+                        }
                     }
-                    // Check Opportunity (Small cells of split player)
+
+                    // Check Opportunity (Small cells of split player) - Keep this for now
                     if (otherSplitState) {
                          for (const otherCell of other.cells) {
                              if (largestOwnCellMass > otherCell.mass * 1.15) {
                                  const dSqToOtherCell = distanceSq(largestOwnCell.x, largestOwnCell.y, otherCell.x, otherCell.y);
-                                 if (dSqToOtherCell < minDistOpportunitySq && dSqToOtherCell < minDistPreySq * 0.8) { // Prioritize closer opportunities
+                                 // Prioritize closer opportunities, but maybe less than the largest prey cell target
+                                 if (dSqToOtherCell < minDistOpportunitySq && (!targetLargestPreyCell || dSqToOtherCell < distanceSq(largestOwnCell.x, largestOwnCell.y, targetLargestPreyCell.x, targetLargestPreyCell.y) * 0.8)) {
                                      minDistOpportunitySq = dSqToOtherCell;
                                      nearestOpportunityTarget = { x: otherCell.x, y: otherCell.y };
                                  }
@@ -660,7 +707,8 @@ class LogicalPlayer {
         } // --- End Player Perception Loop ---
 
         // --- Check Food (If no better targets) ---
-        if (virusToFeed == null && nearestThreatPlayerCenter == null && nearestPreyPlayerCenter == null && nearestOpportunityTarget == null) {
+        // MODIFIED: Check food only if no threat, no feed target, AND no largest prey cell target
+        if (virusToFeed == null && nearestThreatPlayerCenter == null && targetLargestPreyCell == null && nearestOpportunityTarget == null) {
             for (const food of foods) {
                  const dSq = distanceSq(largestOwnCell.x, largestOwnCell.y, food.x, food.y);
                  if (dSq < viewRadiusSq && dSq < minDistFoodSq) {
@@ -698,24 +746,83 @@ class LogicalPlayer {
 
         // 1. Fleeing
         if (nearestThreatPlayerCenter) {
-            if (isSmallEnoughToHide && nearestSafeVirus) { // Try hiding
+            const EDGE_FLEE_THRESHOLD = largestOwnCellRadius * 1.5; // How close to edge to trigger alternative flee
+            const canvasWidth = canvas ? canvas.width : 800;
+            const canvasHeight = canvas ? canvas.height : 600;
+            let isNearEdge = false;
+            let pushDirectionX = center.x - nearestThreatPlayerCenter.x;
+            let pushDirectionY = center.y - nearestThreatPlayerCenter.y;
+            const pushMagnitude = Math.sqrt(pushDirectionX * pushDirectionX + pushDirectionY * pushDirectionY);
+            if (pushMagnitude > 0.1) {
+                pushDirectionX /= pushMagnitude; // Normalized direction AI is being pushed
+                pushDirectionY /= pushMagnitude;
+            }
+
+            // Check proximity to edges and if being pushed towards them
+            if ((largestOwnCell.x < EDGE_FLEE_THRESHOLD && pushDirectionX < -0.5) || // Near left edge, pushed left
+                (largestOwnCell.x > canvasWidth - EDGE_FLEE_THRESHOLD && pushDirectionX > 0.5) || // Near right edge, pushed right
+                (largestOwnCell.y < EDGE_FLEE_THRESHOLD && pushDirectionY < -0.5) || // Near top edge, pushed up
+                (largestOwnCell.y > canvasHeight - EDGE_FLEE_THRESHOLD && pushDirectionY > 0.5)) // Near bottom edge, pushed down
+            {
+                isNearEdge = true;
+            }
+
+            // A. Try Hiding First (if applicable and near edge or not)
+            if (isSmallEnoughToHide && nearestSafeVirus) {
                 const distToVirusSq = minDistSafeVirusSq;
                 const distToThreatSq = minDistThreatSq;
-                 if (distToVirusSq < distToThreatSq) { // Virus closer than threat
+                 if (distToVirusSq < distToThreatSq * 1.2) { // Prioritize hiding if virus is reasonably close
                      const vX = nearestSafeVirus.x - center.x, vY = nearestSafeVirus.y - center.y;
                      const tX = center.x - nearestThreatPlayerCenter.x, tY = center.y - nearestThreatPlayerCenter.y;
-                     if (vX * tX + vY * tY > 0) { // Virus generally away from threat
+                     // Check if virus is generally away from the threat direction
+                     if (vX * tX + vY * tY > 0) {
                          this.aiTarget = { x: nearestSafeVirus.x, y: nearestSafeVirus.y, type: 'hiding' }; return;
                      }
                  }
             }
-            // Default Flee
+
+            // B. Edge Flee Logic (if hiding wasn't chosen and near edge)
+            if (isNearEdge) {
+                const fleeAngle = Math.atan2(pushDirectionY, pushDirectionX); // Angle AI is being pushed
+                const angle1 = fleeAngle + Math.PI / 2; // Perpendicular direction 1
+                const angle2 = fleeAngle - Math.PI / 2; // Perpendicular direction 2
+                const fleeDistance = viewRadius * 0.8; // Flee distance along the edge
+
+                const target1X = center.x + Math.cos(angle1) * fleeDistance;
+                const target1Y = center.y + Math.sin(angle1) * fleeDistance;
+                const target2X = center.x + Math.cos(angle2) * fleeDistance;
+                const target2Y = center.y + Math.sin(angle2) * fleeDistance;
+
+                // Simple check: which target is further from the center of the canvas?
+                // This tends to move away from corners.
+                const distSqToCenter1 = distanceSq(target1X, target1Y, canvasWidth / 2, canvasHeight / 2);
+                const distSqToCenter2 = distanceSq(target2X, target2Y, canvasWidth / 2, canvasHeight / 2);
+
+                let chosenTargetX, chosenTargetY;
+                if (distSqToCenter1 >= distSqToCenter2) { // Prefer target further from center
+                    chosenTargetX = target1X;
+                    chosenTargetY = target1Y;
+                } else {
+                    chosenTargetX = target2X;
+                    chosenTargetY = target2Y;
+                }
+
+                // Clamp chosen target to canvas bounds (with a small buffer)
+                chosenTargetX = Math.max(largestOwnCellRadius, Math.min(chosenTargetX, canvasWidth - largestOwnCellRadius));
+                chosenTargetY = Math.max(largestOwnCellRadius, Math.min(chosenTargetY, canvasHeight - largestOwnCellRadius));
+
+                this.aiTarget = { x: chosenTargetX, y: chosenTargetY, type: 'edgeFleeing' };
+                return; // Exit after setting edge flee target
+            }
+
+            // C. Default Flee (if not hiding and not edge fleeing)
             const fleeAngle = Math.atan2(center.y - nearestThreatPlayerCenter.y, center.x - nearestThreatPlayerCenter.x);
             const fleeDistance = viewRadius * 1.1;
             let fleeTargetX = center.x + Math.cos(fleeAngle) * fleeDistance;
             let fleeTargetY = center.y + Math.sin(fleeAngle) * fleeDistance;
-            fleeTargetX = Math.max(-50, Math.min(fleeTargetX, canvas.width + 50));
-            fleeTargetY = Math.max(-50, Math.min(fleeTargetY, canvas.height + 50));
+            // Clamp slightly outside bounds to encourage moving away
+            fleeTargetX = Math.max(-50, Math.min(fleeTargetX, canvasWidth + 50));
+            fleeTargetY = Math.max(-50, Math.min(fleeTargetY, canvasHeight + 50));
             this.aiTarget = { x: fleeTargetX, y: fleeTargetY, type: 'fleeing' }; return;
         }
 
@@ -729,22 +836,150 @@ class LogicalPlayer {
             this.aiTarget = { x: targetX, y: targetY, type: 'avoidingVirus' }; return;
         }
 
-        // 3. Execute Virus Feeding
+        // --- MODIFIED: 3. Proximity Virus Feeding (No Target Needed) ---
+        const MIN_FEED_MASS_ABSOLUTE = 20;
+        const canFeedNow = AI_CAN_FEED_VIRUS &&
+                        largestOwnCell.mass >= MIN_MASS_TO_FEED_VIRUS &&
+                        !ownSplitState &&
+                        this.aiFeedVirusCooldown <= 0 &&
+                        virusToFeed == null; // ADDED: Only do proximity feed if no targeted feed is planned
+
+        if (canFeedNow) {
+            let bestDirectionalVirus = null;
+            let maxDotProduct = -1.1; // Start below possible dot product range [-1, 1]
+            const safeDistSqThreshold = (largestOwnCellRadius + virusRadius + 15)**2;
+            const maxDistSqThreshold = (largestOwnCellRadius + virusRadius + 100)**2; // Don't feed viruses too far away
+
+            // Determine intended direction (if AI has a target)
+            let targetDirX = 0, targetDirY = 0, hasTargetDirection = false;
+            if (this.aiTarget) {
+                const dxTarget = this.aiTarget.x - largestOwnCell.x;
+                const dyTarget = this.aiTarget.y - largestOwnCell.y;
+                const distTargetSq = dxTarget * dxTarget + dyTarget * dyTarget;
+                if (distTargetSq > 1) {
+                    const distTarget = Math.sqrt(distTargetSq);
+                    targetDirX = dxTarget / distTarget;
+                    targetDirY = dyTarget / distTarget;
+                    hasTargetDirection = true;
+                }
+            }
+
+            for (const virus of viruses) {
+                const dSqLargestToVirus = distanceSq(largestOwnCell.x, largestOwnCell.y, virus.x, virus.y);
+
+                // Check if virus is within safe and reasonable feeding distance
+                if (dSqLargestToVirus > safeDistSqThreshold && dSqLargestToVirus < maxDistSqThreshold) {
+
+                    // If AI has no specific target, any close virus is potentially valid (original behavior)
+                    if (!hasTargetDirection) {
+                         // Simple proximity check (choose the absolute closest in range)
+                         // Note: This part might need refinement if you want wandering AI to feed more strategically.
+                         // For now, it picks the closest valid one.
+                         if (bestDirectionalVirus === null || dSqLargestToVirus < distanceSq(largestOwnCell.x, largestOwnCell.y, bestDirectionalVirus.x, bestDirectionalVirus.y)) {
+                             bestDirectionalVirus = virus;
+                         }
+                         continue; // Skip dot product check if no target direction
+                    }
+
+                    // Calculate direction to virus
+                    const dxVirus = virus.x - largestOwnCell.x;
+                    const dyVirus = virus.y - largestOwnCell.y;
+                    const distVirus = Math.sqrt(dSqLargestToVirus);
+                    const virusDirX = dxVirus / distVirus;
+                    const virusDirY = dyVirus / distVirus;
+
+                    // Calculate dot product
+                    const dotProduct = targetDirX * virusDirX + targetDirY * virusDirY;
+
+                    // Check if this virus is more aligned with the target direction than previous best
+                    // Use a threshold (e.g., > 0.5) to ensure it's generally in the right direction
+                    const DOT_PRODUCT_THRESHOLD = 0.6; // Virus must be somewhat in front (adjust as needed)
+                    if (dotProduct > DOT_PRODUCT_THRESHOLD && dotProduct > maxDotProduct) {
+                        maxDotProduct = dotProduct;
+                        bestDirectionalVirus = virus;
+                    }
+                }
+            } // End virus loop for proximity check
+
+            // Feed the best virus found (if any)
+            if (bestDirectionalVirus) {
+                const feedMassCost = largestOwnCell.mass * 0.05; // Calculate 5% cost
+
+                // Check if 5% cost is meaningful and doesn't make cell too small
+                if (feedMassCost >= MIN_FEED_MASS_ABSOLUTE && largestOwnCell.mass - feedMassCost > playerSplitMinMassPerPiece * 0.5) {
+                    if (Math.random() < AI_FEED_VIRUS_PROBABILITY) { // Still keep the probability check
+                        // Execute feed & split
+                        bestDirectionalVirus.triggerFlash();
+
+                        feedPellets.push(new FeedPellet(largestOwnCell.x, largestOwnCell.y, bestDirectionalVirus.x, bestDirectionalVirus.y, PELLET_RADIUS, this.color));
+
+                        largestOwnCell.setMass(largestOwnCell.mass - feedMassCost);
+                        this.calculateTotalMass();
+
+                        // Split the virus away from the feeding cell (or towards target if preferred)
+                        const splitAngle = Math.atan2(bestDirectionalVirus.y - largestOwnCell.y, bestDirectionalVirus.x - largestOwnCell.x);
+                        // Option 2: Split towards AI target (if it exists)
+                        // const splitAngle = hasTargetDirection ? Math.atan2(targetDirY, targetDirX) : Math.atan2(bestDirectionalVirus.y - largestOwnCell.y, bestDirectionalVirus.x - largestOwnCell.x);
+
+                        // REMOVED: Spawn a new virus moving in the calculated direction (original virus remains)
+                        // const splitTargetX = bestDirectionalVirus.x + Math.cos(splitAngle) * 100;
+                        // const splitTargetY = bestDirectionalVirus.y + Math.sin(splitAngle) * 100;
+                        // spawnNewVirusAt(bestDirectionalVirus.x, bestDirectionalVirus.y, splitTargetX, splitTargetY);
+
+                        // --- ADDED: Make the existing virus move ---
+                        const burstSpeed = virusRadius * 0.4; // Use the same speed as spawnNewVirusAt
+                        bestDirectionalVirus.vx = Math.cos(splitAngle) * burstSpeed;
+                        bestDirectionalVirus.vy = Math.sin(splitAngle) * burstSpeed;
+                        // --- END ADDED ---
+
+                        // Set cooldown and force re-evaluation
+                        this.aiFeedVirusCooldown = AI_FEED_VIRUS_COOLDOWN_DURATION;
+                        this.aiTarget = null;
+                        this.aiUpdateCooldown = 0;
+                        return; // Feeding takes priority
+                    }
+                }
+            }
+        }
+        // --- END NEW FEEDING LOGIC ---
+
+        // --- MODIFIED: 4. Execute Targeted Virus Feeding ---
+        // Note: Priority is now lower than proximity feeding due to reordering
         if (virusToFeed && targetToFeedVirus) {
-             if (largestOwnCell.mass >= MIN_MASS_TO_FEED_VIRUS) {
-                 virusToFeed.triggerFlash();
-                 feedPellets.push(new FeedPellet(largestOwnCell.x, largestOwnCell.y, virusToFeed.x, virusToFeed.y, PELLET_RADIUS, this.color));
-                 largestOwnCell.setMass(largestOwnCell.mass - VIRUS_FEED_MASS_COST);
-                 this.calculateTotalMass();
-                 virusToFeed.feedCount++;
-                 if (virusToFeed.feedCount >= VIRUS_MAX_FEED_COUNT) {
-                     if (virusToFeed.splitTowards(targetToFeedVirus.x, targetToFeedVirus.y)) {
-                             const index = viruses.indexOf(virusToFeed);
-                             if (index > -1) viruses.splice(index, 1);
-                     }
-                 }
-             }
-             this.aiTarget = null; this.aiUpdateCooldown = 0; return; // Force re-evaluation
+            const feedMassCost = largestOwnCell.mass * 0.05; // Calculate 5% cost
+            // Check if cell has enough mass and the cost is meaningful
+            if (largestOwnCell.mass >= MIN_MASS_TO_FEED_VIRUS && feedMassCost >= MIN_FEED_MASS_ABSOLUTE && largestOwnCell.mass - feedMassCost > playerSplitMinMassPerPiece * 0.5) {
+                virusToFeed.triggerFlash(); // Keep flash
+
+                // Create pellet (optional visual)
+                feedPellets.push(new FeedPellet(largestOwnCell.x, largestOwnCell.y, virusToFeed.x, virusToFeed.y, PELLET_RADIUS, this.color));
+
+                // Reduce mass
+                largestOwnCell.setMass(largestOwnCell.mass - feedMassCost);
+                this.calculateTotalMass();
+
+                // --- Directly trigger split towards target ---
+                // REMOVED: Remove original virus
+                // const index = viruses.indexOf(virusToFeed);
+                // if (index > -1) {
+                //     viruses.splice(index, 1); // Remove original
+                //     // Spawn a new virus moving towards the target player's center
+                //     spawnNewVirusAt(virusToFeed.x, virusToFeed.y, targetToFeedVirus.x, targetToFeedVirus.y);
+                // }
+
+                // --- ADDED: Make the existing virus move towards target ---
+                const angle = Math.atan2(targetToFeedVirus.y - virusToFeed.y, targetToFeedVirus.x - virusToFeed.x);
+                const burstSpeed = virusRadius * 0.4; // Use the same speed as spawnNewVirusAt
+                virusToFeed.vx = Math.cos(angle) * burstSpeed;
+                virusToFeed.vy = Math.sin(angle) * burstSpeed;
+                // --- END ADDED ---
+
+                // --- End split trigger ---
+            }
+            // Force re-evaluation even if feed didn't happen (target might become invalid)
+            this.aiTarget = null;
+            this.aiUpdateCooldown = 0;
+            return;
         }
 
         // 4. Protect Fragments
@@ -752,40 +987,35 @@ class LogicalPlayer {
             this.aiTarget = { x: targetVulnerableCell.x, y: targetVulnerableCell.y, type: 'protecting' }; return;
         }
 
-        // 5. Hunt Opportunity Target
+        // 5. Hunt Largest Eligible Prey Cell (NEW)
+        if (targetLargestPreyCell) {
+            this.aiTarget = { x: targetLargestPreyCell.x, y: targetLargestPreyCell.y, type: 'huntingLargestPreyCell' }; return;
+        }
+
+        // 6. Hunt Opportunity Target (Existing, now lower priority than largest prey)
         if (nearestOpportunityTarget) {
             this.aiTarget = { x: nearestOpportunityTarget.x, y: nearestOpportunityTarget.y, type: 'opportunisticHunt' }; return;
         }
 
-        // 6. Hunt Regular Prey
-        if (nearestPreyPlayerCenter) {
-            this.aiTarget = { x: nearestPreyPlayerCenter.x, y: nearestPreyPlayerCenter.y, type: 'hunting' }; return;
-        }
+        // 7. Hunt Regular Prey (REMOVED - Replaced by huntingLargestPreyCell)
+        // if (nearestPreyPlayerCenter) {
+        //     this.aiTarget = { x: nearestPreyPlayerCenter.x, y: nearestPreyPlayerCenter.y, type: 'hunting' }; return;
+        // }
 
-        // 7. Seek Food
+        // 8. Seek Food (Now priority 7)
         if (nearestFood) {
             this.aiTarget = { x: nearestFood.x, y: nearestFood.y, type: 'seekingFood' }; return;
         }
 
-        // 8. Assist Merging
+        // 9. Assist Merging (Now priority 8)
         if (ownSplitState && this.cells.length > 1) {
             const ownCenter = this.findCenterOfMass();
             this.aiTarget = { x: ownCenter.x, y: ownCenter.y, type: 'mergingAssist' }; return;
         }
 
-        // 9. Wander
-        const targetDistSq = this.aiTarget ? distanceSq(center.x, center.y, this.aiTarget.x, this.aiTarget.y) : Infinity;
-        if (!this.aiTarget || (this.aiTarget.type === 'wandering' && targetDistSq < (150*150))) {
-                const wanderAngle = Math.random() * Math.PI * 2;
-                const wanderDist = 200 + Math.random() * 300;
-                let wanderX = center.x + Math.cos(wanderAngle) * wanderDist;
-                let wanderY = center.y + Math.sin(wanderAngle) * wanderDist;
-                wanderX = Math.max(50, Math.min(wanderX, canvas.width - 50));
-                wanderY = Math.max(50, Math.min(wanderY, canvas.height - 50));
-                this.aiTarget = { x: wanderX, y: wanderY, type: 'wandering' };
-        }
-        // Keep existing target if none of the above override it
-
+        if (!this.aiTarget || (this.aiTarget.type !== 'fleeing' && this.aiTarget.type !== 'edgeFleeing' && this.aiTarget.type !== 'avoidingVirus' && this.aiTarget.type !== 'protecting' && this.aiTarget.type !== 'huntingLargestPreyCell' && this.aiTarget.type !== 'opportunisticHunt' && this.aiTarget.type !== 'seekingFood' && this.aiTarget.type !== 'mergingAssist')) {
+            this.aiTarget = null; // Explicitly set to null if no action decided
+       }
     } // --- End of findAITarget ---
 
     getLargestCell() {
@@ -903,8 +1133,10 @@ class LogicalPlayer {
              this.markAsEaten(); return;
         }
 
+        // 更新 AI 目標和餵食冷卻
         this.aiUpdateCooldown -= deltaTime;
         if (this.aiUpdateCooldown <= 0) this.findAITarget();
+        if (this.aiFeedVirusCooldown > 0) this.aiFeedVirusCooldown -= deltaTime; // <--- 新增：更新冷卻
 
         // Apply repulsion before movement update
         this.applyIntraPlayerRepulsion();
@@ -921,6 +1153,31 @@ class LogicalPlayer {
     draw() {
         const sortedCells = [...this.cells].sort((a, b) => a.radius - b.radius);
         sortedCells.forEach(cell => cell.draw());
+
+        // --- ADD DEBUG DRAWING BLOCK HERE ---
+        if (DEBUG_DRAW_AI_VIEW && this.currentViewRadius && this.currentViewRadius > 0 && !this.isEaten) {
+            const center = this.findCenterOfMass();
+
+            // Draw View Radius Circle
+            ctx.strokeStyle = 'rgba(255, 255, 0, 0.3)'; // Semi-transparent yellow
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, this.currentViewRadius, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.closePath();
+
+            // Draw AI Target Line
+            if (this.aiTarget) {
+                 ctx.strokeStyle = 'rgba(255, 0, 255, 0.5)'; // Semi-transparent magenta
+                 ctx.lineWidth = 2;
+                 ctx.beginPath();
+                 ctx.moveTo(center.x, center.y);
+                 ctx.lineTo(this.aiTarget.x, this.aiTarget.y);
+                 ctx.stroke();
+                 ctx.closePath();
+            }
+        }
+        // --- END DEBUG DRAWING BLOCK ---
     }
 
     markAsEaten() {
@@ -1082,7 +1339,6 @@ class Virus {
         this.radius = virusRadius;
         this.originalColor = virusColor;
         this.color = this.originalColor;
-        this.feedCount = 0;
         this.mass = Math.PI * this.radius * this.radius;
         this.spikeLength = this.radius * 0.2;
         this.spikeCount = virusSpikeCount;
@@ -1155,7 +1411,7 @@ class Virus {
         return true; // Indicate success
    }
 
-   update(deltaTime) {
+    update(deltaTime) {
         if (this.isFlashing) {
             this.flashTimer -= deltaTime;
             this._flashCycleTimer -= deltaTime;
@@ -1168,20 +1424,26 @@ class Virus {
             }
         }
 
+        // --- ADDED: Update position based on velocity ---
         if (this.vx !== 0 || this.vy !== 0) {
             const timeFactor = deltaTime / 16.67;
-            this.x += this.vx * timeFactor; this.y += this.vy * timeFactor;
-            const dragFactor = 0.95;
-            this.vx *= dragFactor; this.vy *= dragFactor;
-            if (Math.abs(this.vx) < 0.1 && Math.abs(this.vy) < 0.1) { this.vx = 0; this.vy = 0; }
+            this.x += this.vx * timeFactor;
+            this.y += this.vy * timeFactor;
+            const dragFactor = 0.95; // Virus slows down over time
+            this.vx *= dragFactor;
+            this.vy *= dragFactor;
+            if (Math.abs(this.vx) < 0.1 && Math.abs(this.vy) < 0.1) {
+                this.vx = 0; this.vy = 0;
+            }
+            // Clamp to bounds
             const canvasWidth = canvas ? canvas.width : 800;
             const canvasHeight = canvas ? canvas.height : 600;
-            this.x = Math.max(0, Math.min(this.x, canvasWidth));  // Clamp center X
-            this.y = Math.max(0, Math.min(this.y, canvasHeight)); // Clamp center Y
+            this.x = Math.max(this.radius, Math.min(this.x, canvasWidth - this.radius));
+            this.y = Math.max(this.radius, Math.min(this.y, canvasHeight - this.radius));
         }
-   }
+    // --- END ADDED ---
+    }
 }
-
 
 // --- Game Logic ---
 
@@ -1495,7 +1757,7 @@ function gameLoop(timestamp) {
 
     try { // Wrap main game logic in try/catch
         // 1. Spawning Food & Viruses
-        if (foods.length < maxFoodCount && Math.random() < 0.1) spawnFood(getRandomInt(1, 3));
+        if (foods.length < maxFoodCount && Math.random() < 0.15) spawnFood(getRandomInt(2, 5)); // Example: Spawn more frequently and in larger batches
         if (viruses.length < initialVirusCount && Math.random() < 0.01) spawnVirus(1);
 
         // 2. Update Game Objects
@@ -1574,6 +1836,7 @@ document.addEventListener('DOMContentLoaded', () => {
         console.warn("NAME_LIST not found or is not an array. Using default names.");
         nameList = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliett", "Kilo", "Lima", "Mike", "November", "Oscar", "Papa", "Quebec", "Romeo", "Sierra", "Tango", "Uniform", "Victor", "Whiskey", "X-ray", "Yankee", "Zulu"];
     }
+    DEBUG_DRAW_AI_VIEW = !DEBUG_DRAW_AI_VIEW;
     // Call initGame to start audio context, load assets, and setup game data
     initGame();
 });
