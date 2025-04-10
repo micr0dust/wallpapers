@@ -32,7 +32,7 @@ const playerSplitBurstSpeed = 1;
 const respawnDelay = 5000;
 const MAX_DELTA_TIME = 50;
 const LEADERBOARD_UPDATE_INTERVAL = 300;
-const MERGE_COOLDOWN = 9000;
+const MERGE_COOLDOWN = 12000;
 const FLEE_EDGE_DISTANCE_THRESHOLD = 25;
 const PLAYER_EAT_DISTANCE_FACTOR = 0.4;
 const VIRUS_SPLIT_DISTANCE_FACTOR = 0.4;
@@ -52,18 +52,18 @@ const FEED_EDGE_PROXIMITY_THRESHOLD = 50;
 const AI_FEED_VIRUS_PROBABILITY = 0.3;
 const AI_FEED_VIRUS_COOLDOWN_DURATION = 20000;
 const PELLET_SPEED = 10;
-const PELLET_LIFESPAN = 300;
+const PELLET_LIFESPAN = 800;
 const PELLET_RADIUS = 15;
 const MAX_SPAWN_ATTEMPTS = 100;
 const SPAWN_SAFETY_BUFFER = 15;
 let cellBaseSpeedMultiplier = 6.0; // Default, can be updated by WE
 const CELL_SPEED_MASS_FACTOR = 1.1;
 const RESET_ON_MAP_COVERAGE = true;
-const MAP_COVERAGE_RADIUS_FACTOR = 0.85;
+const MAP_COVERAGE_RADIUS_FACTOR = 0.9;
 const INTRA_PLAYER_COLLISION_ENABLED = true; // Keep this if you still want the logic below
-const FADE_DURATION = 2000;
+const FADE_DURATION = 7000;
 const BLACK_SCREEN_DURATION = 500;
-let DEBUG_DRAW_AI_VIEW = false;
+let debug_draw_ai_view = false;
 // const MINIMUM_CELL_MASS_AFTER_SHRINK = 10; // Add if using intra-player collision shrink
 // const INTRA_PLAYER_SHRINK_RATE = 0.005;    // Add if using intra-player collision shrink
 
@@ -86,6 +86,10 @@ window.wallpaperPropertyListener = {
             cellBaseSpeedMultiplier = properties.cellbasespeed.value;
             console.log("Cell Base Speed Multiplier updated to:", cellBaseSpeedMultiplier);
         }
+        if (properties.debugdrawaiview) {
+            debug_draw_ai_view = properties.debugdrawaiview.value;
+            console.log("Debug Draw AI View updated to:", debug_draw_ai_view);
+        }
         // Add other properties if needed
         // Example: Volume control
         // if (properties.backgroundvolume) {
@@ -100,14 +104,21 @@ window.wallpaperPropertyListener = {
 // --- Helper Functions (Agar.io Specific) ---
 function getRandomColor() {
     let color = '#';
+    let r, g, b;
+    const minBrightnessSum = 380; // 閾值 (0-765)，越高越亮
+
     do {
         color = '#';
         const letters = '0123456789ABCDEF';
         for (let i = 0; i < 6; i++) {
             color += letters[Math.floor(Math.random() * 16)];
         }
-        // Ensure color is not too dark or too green-ish (adjust thresholds if needed)
-    } while (parseInt(color.substring(1, 3), 16) < 100 && parseInt(color.substring(3, 5), 16) > 150 && parseInt(color.substring(5, 7), 16) < 100);
+        // 計算 RGB 值的總和來判斷亮度
+        r = parseInt(color.substring(1, 3), 16);
+        g = parseInt(color.substring(3, 5), 16);
+        b = parseInt(color.substring(5, 7), 16);
+        // 確保顏色不會太暗 (RGB 總和低於閾值)
+    } while (r + g + b < minBrightnessSum);
     return color;
 }
 function getRandomInt(min, max) {
@@ -1155,7 +1166,7 @@ class LogicalPlayer {
         sortedCells.forEach(cell => cell.draw());
 
         // --- ADD DEBUG DRAWING BLOCK HERE ---
-        if (DEBUG_DRAW_AI_VIEW && this.currentViewRadius && this.currentViewRadius > 0 && !this.isEaten) {
+        if (debug_draw_ai_view && this.currentViewRadius && this.currentViewRadius > 0 && !this.isEaten) {
             const center = this.findCenterOfMass();
 
             // Draw View Radius Circle
@@ -1836,7 +1847,6 @@ document.addEventListener('DOMContentLoaded', () => {
         console.warn("NAME_LIST not found or is not an array. Using default names.");
         nameList = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India", "Juliett", "Kilo", "Lima", "Mike", "November", "Oscar", "Papa", "Quebec", "Romeo", "Sierra", "Tango", "Uniform", "Victor", "Whiskey", "X-ray", "Yankee", "Zulu"];
     }
-    DEBUG_DRAW_AI_VIEW = !DEBUG_DRAW_AI_VIEW;
     // Call initGame to start audio context, load assets, and setup game data
     initGame();
 });

@@ -13,7 +13,12 @@
                 "min": 0.5,
                 "max": 10.0,
                 "step": 0.1,
-                "value": 6.0 
+                "value": 6.0
+            },
+            "debugdrawaiview": {
+                "type": "bool",
+                "text": "Debug: Draw AI View Radius & Target",
+                "value": false
             }
         }
     }
