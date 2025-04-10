@@ -1,6 +1,6 @@
 {
     "file": "index.html",
-    "title": "AI Tic-Tac-Toe Tree Visualization (DFS Scrolling)",
+    "title": "Tic-Tac-Toe - 井字遊戲",
     "type": "web",
     "description": "Animated visualization of two AI playing Tic-Tac-Toe using Alpha-Beta Minimax, showing the DFS tree traversal with panning. Control speed and highlight color.",
     "preview": "preview.jpg",

@@ -1,7 +1,7 @@
 {
     "type": "web",
     "file": "index.html",
-    "title": "AI Tetris Battle Wallpaper",
+    "title": "Tetris - 俄羅斯方塊",
     "preview": "preview.jpg",
     "description": "Two AI players battle it out in Tetris.",
     "supportsaudioprocessing": false,
