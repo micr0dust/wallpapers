@@ -97,7 +97,7 @@ class Villager {
     }
 
     move() {
-        if (this.path.length > 0) {
+        if (this.path && this.path.length > 0) {
             const nextPos = this.path.shift();
             this.x = nextPos.x;
             this.z = nextPos.z;
@@ -107,7 +107,7 @@ class Villager {
             
             // 只有在村民已經到達建造位置且靜止時才調整高度
             // 移動過程中保持在地面，避免漂浮效果
-            if (this.state === 'constructing' && this.targetBuildPosition && this.path.length === 0) {
+            if (this.state === 'constructing' && this.targetBuildPosition && (!this.path || this.path.length === 0)) {
                 // 檢查是否已到達目標位置
                 const currentGridPos = this.grid.worldToGrid(this.x, this.z);
                 const targetDistance = Math.abs(currentGridPos.x - this.targetBuildPosition.x) + 
@@ -122,7 +122,7 @@ class Villager {
             this.mesh.position.set(this.x, yPosition, this.z);
             
             // 如果到達目標
-            if (this.path.length === 0) {
+            if (!this.path || this.path.length === 0) {
                 this.onReachTarget();
             }
         } else if (this.target) {
@@ -152,7 +152,7 @@ class Villager {
                 break;
             case 'movingToCastle':
                 // 檢查是否已經到達城堡但沒有正確觸發狀態轉換
-                if (this.target && this.path.length === 0) {
+                if (this.target && (!this.path || this.path.length === 0)) {
                     const distance = Math.sqrt(
                         Math.pow(this.x - this.target.x, 2) +
                         Math.pow(this.z - this.target.z, 2)
@@ -392,7 +392,7 @@ class Villager {
         }
         
         // 如果村民沒有移動路徑，立即開始新的隨機移動
-        if (this.path.length === 0) {
+        if (!this.path || this.path.length === 0) {
             this.startRandomCastleMovement();
         }
     }
@@ -1061,9 +1061,6 @@ class Villager {
     setVisibility(visible) {
         if (this.mesh) {
             // 記錄可見性變更（用於調試）
-            if (this.mesh.visible !== visible) {
-                console.log(`村民 ${this.id} 可見性變更: ${this.mesh.visible} -> ${visible} (狀態: ${this.state})`);
-            }
             this.mesh.visible = visible;
         } else {
             console.warn(`村民 ${this.id} 的 mesh 不存在，無法設置可見性`);
@@ -1497,6 +1494,8 @@ class VillagerManager {
     checkVillagerVisibility(isNight) {
         let hiddenCount = 0;
         let fixedCount = 0;
+        let visibleCount = 0;
+        const positionMap = new Map(); // 檢查位置重疊
         
         for (const villager of this.villagers.values()) {
             if (villager.mesh) {
@@ -1509,15 +1508,114 @@ class VillagerManager {
                     fixedCount++;
                 }
                 
-                if (!villager.mesh.visible) {
+                if (villager.mesh.visible) {
+                    visibleCount++;
+                    
+                    // 檢查位置重疊
+                    const posKey = `${Math.round(villager.mesh.position.x)},${Math.round(villager.mesh.position.z)}`;
+                    if (!positionMap.has(posKey)) {
+                        positionMap.set(posKey, []);
+                    }
+                    positionMap.get(posKey).push(villager.id);
+                } else {
                     hiddenCount++;
                 }
+            }
+        }
+        
+        // 檢查位置重疊
+        let overlapCount = 0;
+        for (const [pos, villagerIds] of positionMap) {
+            if (villagerIds.length > 1) {
+                console.warn(`位置 ${pos} 有 ${villagerIds.length} 個村民重疊: ${villagerIds.join(', ')}`);
+                overlapCount += villagerIds.length - 1;
+                
+                // 自動分離重疊的村民
+                this.separateOverlappingVillagers(villagerIds);
             }
         }
         
         if (fixedCount > 0) {
             console.log(`修復了 ${fixedCount} 個意外隱形的村民`);
         }
+        
+        console.log(`村民可見性檢查: 總數 ${this.villagers.size}, 可見 ${visibleCount}, 隱藏 ${hiddenCount}, 重疊 ${overlapCount}`);
+    }
+    
+    // 分離重疊的村民
+    separateOverlappingVillagers(villagerIds) {
+        console.log(`正在分離重疊的村民: ${villagerIds.join(', ')}`);
+        
+        for (let i = 1; i < villagerIds.length; i++) {
+            const villager = this.villagers.get(villagerIds[i]);
+            if (villager && villager.mesh) {
+                // 在原位置周圍尋找新位置
+                const newPos = this.findNearbyPosition(villager.mesh.position.x, villager.mesh.position.z, 3);
+                if (newPos) {
+                    console.log(`將村民 ${villager.id} 從 (${Math.round(villager.mesh.position.x)}, ${Math.round(villager.mesh.position.z)}) 移動到 (${newPos.x}, ${newPos.z})`);
+                    villager.mesh.position.set(newPos.x, 0, newPos.z);
+                    villager.x = newPos.x;
+                    villager.z = newPos.z;
+                    
+                    // 重置村民狀態，讓他們重新尋找任務
+                    console.log(`重置村民 ${villager.id} 的狀態，從 ${villager.state} 改為 idle`);
+                    villager.state = 'idle';
+                    villager.target = null;
+                    villager.workingFarm = null;
+                    villager.constructionBuilding = null;
+                    
+                    // 清除移動路徑
+                    villager.path = []; // 使用空數組而不是 null
+                    villager.pathIndex = 0;
+                }
+            }
+        }
+        
+        // 給分離的村民一些時間穩定，然後重新分配任務
+        setTimeout(() => {
+            console.log('重新分配任務給所有村民...');
+            this.reassignAllVillagers();
+            
+            // 再次顯示狀態，確認任務分配成功
+            setTimeout(() => {
+                console.log('=== 任務重新分配後的村民狀態 ===');
+                for (const villager of this.villagers.values()) {
+                    console.log(`${villager.id}: 狀態=${villager.state}, 目標=${villager.target ? 'yes' : 'no'}, 農田=${villager.workingFarm ? 'yes' : 'no'}`);
+                }
+            }, 2000);
+        }, 1000);
+    }
+    
+    // 在指定位置附近尋找空閒位置
+    findNearbyPosition(centerX, centerZ, radius) {
+        for (let attempts = 0; attempts < 20; attempts++) {
+            const angle = (Math.PI * 2 * attempts) / 20; // 均勻分佈
+            const distance = 1 + (attempts % 3); // 1-3的距離
+            
+            const x = centerX + Math.cos(angle) * distance;
+            const z = centerZ + Math.sin(angle) * distance;
+            
+            // 檢查新位置是否與其他村民重疊
+            let overlaps = false;
+            for (const otherVillager of this.villagers.values()) {
+                if (otherVillager.mesh) {
+                    const dist = Math.sqrt(
+                        (otherVillager.mesh.position.x - x) ** 2 + 
+                        (otherVillager.mesh.position.z - z) ** 2
+                    );
+                    if (dist < 1.5) { // 最小距離1.5單位
+                        overlaps = true;
+                        break;
+                    }
+                }
+            }
+            
+            if (!overlaps) {
+                return { x: Math.round(x), z: Math.round(z) };
+            }
+        }
+        
+        return null;
     }
 
     // 銷毀村民
@@ -1527,6 +1625,49 @@ class VillagerManager {
             villager.destroy();
             this.villagers.delete(villagerId);
         }
+    }
+
+    // 調試：打印所有村民的詳細狀態
+    debugPrintAllVillagers() {
+        console.log('=== 村民狀態調試報告 ===');
+        console.log(`總村民數: ${this.villagers.size}`);
+        
+        let visibleCount = 0;
+        let hiddenCount = 0;
+        const positionMap = new Map();
+        
+        for (const villager of this.villagers.values()) {
+            const visible = villager.mesh ? villager.mesh.visible : '無mesh';
+            const position = villager.mesh ? 
+                `(${Math.round(villager.mesh.position.x)}, ${Math.round(villager.mesh.position.z)})` : 
+                '無位置';
+            
+            console.log(`ID: ${villager.id}, 狀態: ${villager.state}, 可見: ${visible}, 位置: ${position}`);
+            
+            if (villager.mesh && villager.mesh.visible) {
+                visibleCount++;
+                
+                // 檢查重疊
+                const posKey = `${Math.round(villager.mesh.position.x)},${Math.round(villager.mesh.position.z)}`;
+                if (!positionMap.has(posKey)) {
+                    positionMap.set(posKey, []);
+                }
+                positionMap.get(posKey).push(villager.id);
+            } else {
+                hiddenCount++;
+            }
+        }
+        
+        // 檢查並修復重疊
+        for (const [pos, villagerIds] of positionMap) {
+            if (villagerIds.length > 1) {
+                console.warn(`發現重疊位置 ${pos}: ${villagerIds.join(', ')}`);
+                this.separateOverlappingVillagers(villagerIds);
+            }
+        }
+        
+        console.log(`可見村民: ${visibleCount}, 隱藏村民: ${hiddenCount}`);
+        console.log('=== 報告結束 ===');
     }
 
     // 獲取所有村民
@@ -1590,5 +1731,43 @@ class VillagerManager {
             }
         }
         return farmWorkers;
+    }
+    
+    // 重新分配所有空閒村民的任務
+    reassignAllVillagers() {
+        console.log('開始重新分配村民任務...');
+        
+        let idleCount = 0;
+        for (const villager of this.villagers.values()) {
+            if (villager.state === 'idle' && !villager.target) {
+                idleCount++;
+                console.log(`發現空閒村民: ${villager.id}`);
+                
+                // 優先分配到農田工作
+                const availableFarms = this.buildingManager.farms.filter(farm => 
+                    farm.isComplete && !farm.hasWorker()
+                );
+                
+                if (availableFarms.length > 0) {
+                    const farm = availableFarms[0];
+                    const worldPos = farm.getWorldPosition();
+                    villager.target = { x: worldPos.x, z: worldPos.z };
+                    villager.state = 'movingToFarm';
+                    villager.workingFarm = farm;
+                    farm.setWorker(villager);
+                    
+                    const gridPos = villager.grid.worldToGrid(worldPos.x, worldPos.z);
+                    villager.createPath(gridPos.x, gridPos.y);
+                    
+                    console.log(`分配村民 ${villager.id} 到農田`);
+                } else {
+                    // 沒有空閒農田，去砍樹
+                    console.log(`村民 ${villager.id} 去砍樹 (沒有空閒農田)`);
+                    villager.state = 'idle'; // 讓村民在下次更新時自動尋找樹木
+                }
+            }
+        }
+        
+        console.log(`重新分配完成，處理了 ${idleCount} 個空閒村民`);
     }
 }

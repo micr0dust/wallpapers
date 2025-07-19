@@ -149,6 +149,18 @@
     <script>
         const game = new Game();
         game.init();
+        
+        // 全局調試函數
+        window.debugVillagers = function() {
+            if (game.world) {
+                game.world.debugVillagers();
+            } else {
+                console.log('遊戲世界尚未初始化');
+            }
+        };
+        
+        // 在控制台提示調試命令
+        console.log('調試命令已載入。使用 debugVillagers() 來檢查村民狀態');
     </script>
 </body>
 </html>

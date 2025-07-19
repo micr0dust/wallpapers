@@ -850,6 +850,19 @@ class World {
         this.gameSpeed = Math.max(0.1, Math.min(5, speed));
         return this.gameSpeed;
     }
+    
+    // 調試函數：檢查村民狀態
+    debugVillagers() {
+        if (this.villagerManager) {
+            this.villagerManager.debugPrintAllVillagers();
+            
+            // 強制檢查村民可見性
+            const isNight = this.lightingSystem.timeOfDay > 0.75 || this.lightingSystem.timeOfDay < 0.25;
+            this.villagerManager.checkVillagerVisibility(isNight);
+        } else {
+            console.log('村民管理器尚未初始化');
+        }
+    }
 
     // 處理窗口大小變化
     handleResize() {
