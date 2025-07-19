@@ -80,7 +80,7 @@ class World {
     }
 
     createGround() {
-        const groundSize = 1000; // 適應更近的視角和500x500網格
+        const groundSize = 400; // 適應200x200網格（200*2=400）
         const segments = 200; // 增加地面分段數以支持地形起伏
         
         // 創建帶有更多頂點的地面幾何體
@@ -273,15 +273,15 @@ class World {
         this.lightingSystem.sunLight = new THREE.DirectionalLight(0xffffff, 1.0);
         this.lightingSystem.sunLight.castShadow = true;
         
-        // 設置高質量陰影參數
+        // 設置高質量陰影參數（適應200x200地圖和濃密霧效果）
         this.lightingSystem.sunLight.shadow.mapSize.width = 4096;
         this.lightingSystem.sunLight.shadow.mapSize.height = 4096;
         this.lightingSystem.sunLight.shadow.camera.near = 0.5;
-        this.lightingSystem.sunLight.shadow.camera.far = 800;
-        this.lightingSystem.sunLight.shadow.camera.left = -300;
-        this.lightingSystem.sunLight.shadow.camera.right = 300;
-        this.lightingSystem.sunLight.shadow.camera.top = 300;
-        this.lightingSystem.sunLight.shadow.camera.bottom = -300;
+        this.lightingSystem.sunLight.shadow.camera.far = 400; // 減少遠距離以配合霧效果
+        this.lightingSystem.sunLight.shadow.camera.left = -200; // 適應較小地圖
+        this.lightingSystem.sunLight.shadow.camera.right = 200;
+        this.lightingSystem.sunLight.shadow.camera.top = 200;
+        this.lightingSystem.sunLight.shadow.camera.bottom = -200;
         this.lightingSystem.sunLight.shadow.bias = -0.0005;
         
         this.scene.add(this.lightingSystem.sunLight);
@@ -518,7 +518,7 @@ class World {
 
     setupGameSystems() {
         // 初始化遊戲系統
-        this.grid = new Grid(500); // 改為500x500網格
+        this.grid = new Grid(200); // 改為200x200網格
         this.buildingManager = new BuildingManager(this.grid, this.scene);
         this.villagerManager = new VillagerManager(this.grid, this.scene, this.buildingManager);
         this.treeManager = new TreeManager(this.grid, this.scene); // 移除樹木數量參數，改為自動計算
@@ -528,9 +528,9 @@ class World {
     }
 
     setupInitialBuildings() {
-        // 在世界中心建造第一個城堡（適應500x500網格）
-        const centerX = 250;
-        const centerY = 250;
+        // 在世界中心建造第一個城堡（適應200x200網格）
+        const centerX = 100;
+        const centerY = 100;
         
         // 清除城堡建造位置的樹木（較小範圍，只清理建築本身需要的空間）
         this.treeManager.clearTreesInArea(centerX, centerY, 8);
@@ -959,7 +959,7 @@ class World {
         
         if (castles.length === 0) {
             // 第一個城堡在中心
-            buildPos = { x: 247, y: 247 }; // 500x500網格的中心附近
+            buildPos = { x: 97, y: 97 }; // 200x200網格的中心附近
         } else {
             // 找到距離現有城堡較遠的位置
             buildPos = this.findBuildPositionNearCastle(6, false); // 城堡6x6，不是農田

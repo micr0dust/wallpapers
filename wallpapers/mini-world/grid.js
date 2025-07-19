@@ -1,6 +1,6 @@
-// 網格系統類別 - 管理500x500的座標系統
+// 網格系統類別 - 管理200x200的座標系統
 class Grid {
-    constructor(size = 500) {
+    constructor(size = 200) {
         this.size = size;
         // 使用二維陣列來追蹤每個位置的佔用狀態
         this.occupancy = Array(size).fill().map(() => Array(size).fill(false));

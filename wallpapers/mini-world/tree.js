@@ -114,10 +114,10 @@ class TreeManager {
         
         // 計算樹木數量：M = (N/10) * (N/10)
         const N = grid.size;
-        this.totalTrees = Math.floor(N / 10) * Math.floor(N / 10);
+        this.totalTrees = Math.floor(N / 5) * Math.floor(N / 5);
         
         // 計算聚集點數量：M/(N/10)
-        this.clusterPoints = Math.floor(this.totalTrees / (N / 10));
+        this.clusterPoints = Math.floor(this.totalTrees / (N / 5));
         
         this.trees = new Map();
         this.destroyedTrees = new Map();

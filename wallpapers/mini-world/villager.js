@@ -73,8 +73,12 @@ class Villager {
         this.updateNightState(isNight);
         
         // 安全檢查：確保白天時村民是可見的（除非在躲避狀態）
-        if (!isNight && this.state !== 'hiding' && this.mesh && !this.mesh.visible) {
-            this.setVisibility(true);
+        // 增強檢查：所有非躲避狀態的村民在白天都應該可見
+        if (!isNight && this.state !== 'hiding' && this.state !== 'movingToShelter' && this.mesh) {
+            if (!this.mesh.visible) {
+                console.warn(`村民 ${this.id} 在白天被意外隱藏，正在恢復可見性`);
+                this.setVisibility(true);
+            }
         }
         
         // 處理第一棟城堡建造模式的隨機移動
@@ -1056,7 +1060,13 @@ class Villager {
     // 設置村民可見性
     setVisibility(visible) {
         if (this.mesh) {
+            // 記錄可見性變更（用於調試）
+            if (this.mesh.visible !== visible) {
+                console.log(`村民 ${this.id} 可見性變更: ${this.mesh.visible} -> ${visible} (狀態: ${this.state})`);
+            }
             this.mesh.visible = visible;
+        } else {
+            console.warn(`村民 ${this.id} 的 mesh 不存在，無法設置可見性`);
         }
     }
 
@@ -1114,6 +1124,11 @@ class VillagerManager {
             this.lastConstructionCheck = currentTime;
         }
         
+        // 定期檢查村民可見性（每10秒檢查一次，防止村民意外消失）
+        if (!this.lastVisibilityCheck || currentTime - this.lastVisibilityCheck >= 10000) {
+            this.checkVillagerVisibility(isNight);
+            this.lastVisibilityCheck = currentTime;
+        }
 
         
         // 檢查是否剛進入夜晚狀態
@@ -1225,10 +1240,8 @@ class VillagerManager {
                 villager.mesh.position.y = 0;
             }
             
-            // 如果村民不是原本在躲避狀態，確保他們是可見的
-            if (!wasHiding) {
-                villager.setVisibility(true);
-            }
+            // 確保所有村民都是可見的（修正村民消失問題）
+            villager.setVisibility(true);
         }
     }
 
@@ -1478,6 +1491,33 @@ class VillagerManager {
     // 獲取村民數量
     getVillagerCount() {
         return this.villagers.size;
+    }
+
+    // 檢查村民可見性，防止村民意外消失
+    checkVillagerVisibility(isNight) {
+        let hiddenCount = 0;
+        let fixedCount = 0;
+        
+        for (const villager of this.villagers.values()) {
+            if (villager.mesh) {
+                // 白天時，除了躲避和移動到避難所的村民，其他都應該可見
+                const shouldBeVisible = !isNight && villager.state !== 'hiding' && villager.state !== 'movingToShelter';
+                
+                if (shouldBeVisible && !villager.mesh.visible) {
+                    console.warn(`發現隱形村民 ${villager.id} (狀態: ${villager.state})，正在修復...`);
+                    villager.setVisibility(true);
+                    fixedCount++;
+                }
+                
+                if (!villager.mesh.visible) {
+                    hiddenCount++;
+                }
+            }
+        }
+        
+        if (fixedCount > 0) {
+            console.log(`修復了 ${fixedCount} 個意外隱形的村民`);
+        }
     }
 
     // 銷毀村民

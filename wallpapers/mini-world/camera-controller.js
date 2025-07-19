@@ -20,8 +20,8 @@ class CameraController {
     }
 
     setupFog() {
-        // 設置霧效果，遠處變模糊（調整以適應地形）
-        this.scene.fog = new THREE.Fog(0x87CEEB, 60, 250); // 稍微調近霧的開始距離以突出地形細節
+        // 設置霧效果，使用指數霧創造更濃密的效果（適應200x200地圖）
+        this.scene.fog = new THREE.FogExp2(0x87CEEB, 0.015); // 使用指數霧，密度0.015平衡可見度和遮蔽效果
         this.renderer.setClearColor(0x87CEEB); // 設置背景色為天藍色
     }
 
@@ -64,7 +64,7 @@ class CameraController {
 
     // 調整旋轉半徑
     setRadius(radius) {
-        this.radius = Math.max(50, Math.min(500, radius)); // 限制半徑範圍
+        this.radius = Math.max(30, Math.min(300, radius)); // 限制半徑範圍（適應200x200地圖）
     }
 
     // 調整相機高度
