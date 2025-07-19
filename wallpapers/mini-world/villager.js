@@ -1244,12 +1244,20 @@ class VillagerManager {
 
     // 白天時重新分配村民工作
     reassignVillagersAfterDawn() {
+        console.log('白天來臨！重新分配村民工作，優先完成未完成的建築...');
+        
         // 等待片刻讓所有村民完成從躲避狀態的轉換
         setTimeout(() => {
             // 首先確保所有村民都是可見的（修正隱形村民問題）
             for (const villager of this.villagers.values()) {
                 villager.setVisibility(true);
             }
+            
+            // 檢查並修復建築狀態問題
+            this.fixBrokenBuildings();
+            
+            // 最高優先級：立即完成前一晚未完成的建築工作
+            this.prioritizeUnfinishedBuildings();
             
             // 首先確保所有未完成建築有足夠工人（最高優先級）
             this.ensureConstructionWorkersAssigned();
@@ -1277,7 +1285,10 @@ class VillagerManager {
             return;
         }
         
+        console.log('白天開始，優先分配工人完成未完成的建築...');
+        
         // 第一步：重新激活已經分配給未完成建築的村民
+        let reactivatedWorkers = 0;
         for (const villager of this.villagers.values()) {
             if (villager.constructionBuilding && 
                 !villager.constructionBuilding.isComplete && 
@@ -1289,10 +1300,12 @@ class VillagerManager {
                 }
                 
                 villager.state = 'constructing';
+                reactivatedWorkers++;
+                console.log(`重新激活村民 ${villager.id} 繼續建造 ${villager.constructionBuilding.type}`);
             }
         }
         
-        // 第二步：找出所有需要工人的建築
+        // 第二步：找出所有需要工人的建築，按優先級排序
         const buildingsNeedingWorkers = [];
         
         const allBuildings = [
@@ -1305,28 +1318,59 @@ class VillagerManager {
         allBuildings.forEach(building => {
             if (building.isUnderConstruction && building.constructionWorkers.length < building.maxWorkers) {
                 const shortfall = building.maxWorkers - building.constructionWorkers.length;
-                buildingsNeedingWorkers.push({ building, shortfall });
+                const progress = building.constructionProgress || 0;
+                const maxProgress = building.constructionRequired || 100;
+                
+                buildingsNeedingWorkers.push({ 
+                    building, 
+                    shortfall, 
+                    progress,
+                    progressPercent: (progress / maxProgress) * 100,
+                    priority: this.getBuildingPriority(building, progress, maxProgress)
+                });
             }
         });
         
-        // 按照需求人數排序，優先處理需要更多工人的建築
-        buildingsNeedingWorkers.sort((a, b) => b.shortfall - a.shortfall);
+        // 按優先級排序：已經開工的建築 > 新建築，進度越高優先級越高
+        buildingsNeedingWorkers.sort((a, b) => {
+            // 優先完成已經開工的建築
+            if (a.progress > 0 && b.progress === 0) return -1;
+            if (a.progress === 0 && b.progress > 0) return 1;
+            
+            // 在已經開工的建築中，優先完成進度更高的
+            if (a.progress > 0 && b.progress > 0) {
+                return b.progressPercent - a.progressPercent;
+            }
+            
+            // 在新建築中，按類型優先級排序
+            return b.priority - a.priority;
+        });
         
-        for (const { building, shortfall } of buildingsNeedingWorkers) {
+        let totalAssignedWorkers = 0;
+        for (const { building, shortfall, progressPercent } of buildingsNeedingWorkers) {
             let workersAssigned = 0;
             
-            // 從其他工作中調派村民
+            console.log(`建築 ${building.type} 需要 ${shortfall} 個工人 (進度: ${progressPercent.toFixed(1)}%)`);
+            
+            // 從其他工作中調派村民，對於已開工建築更加積極
+            const isPartiallyBuilt = progressPercent > 0;
             for (const villager of this.villagers.values()) {
                 if (workersAssigned >= shortfall) break;
                 
-                // 如果村民在農田或砍樹工作，優先調派到建造
-                if ((villager.state === 'farming' || villager.state === 'harvestingFarm' || 
+                // 對於已經開工的建築，更積極地調派村民（包括農田工人）
+                const canReassign = isPartiallyBuilt ? 
+                    (villager.state === 'farming' || villager.state === 'harvestingFarm' || 
                      villager.state === 'chopping' || villager.state === 'movingToTree' ||
-                     villager.state === 'idle') && 
-                    !villager.constructionBuilding && !villager.firstCastleMode) {
-                    
+                     villager.state === 'movingToFarm' || villager.state === 'idle') :
+                    (villager.state === 'chopping' || villager.state === 'movingToTree' ||
+                     villager.state === 'idle');
+                
+                if (canReassign && !villager.constructionBuilding && !villager.firstCastleMode) {
                     // 清理當前工作
                     if (villager.workingFarm) {
+                        if (isPartiallyBuilt) {
+                            console.log(`從農田調派村民 ${villager.id} 去完成建築 ${building.type}`);
+                        }
                         villager.workingFarm.removeWorker?.(villager);
                         villager.workingFarm = null;
                     }
@@ -1341,10 +1385,122 @@ class VillagerManager {
                         villager.constructionBuilding = building;
                         villager.state = 'constructing';
                         workersAssigned++;
+                        totalAssignedWorkers++;
+                        console.log(`分配村民 ${villager.id} 到建築 ${building.type}`);
                     }
                 }
             }
         }
+        
+        if (totalAssignedWorkers > 0) {
+            console.log(`總共分配了 ${totalAssignedWorkers + reactivatedWorkers} 個工人到建築工作`);
+        }
+    }
+    
+    // 獲取建築優先級
+    getBuildingPriority(building, progress, maxProgress) {
+        // 已經開工的建築總是優先
+        if (progress > 0) {
+            return 1000 + (progress / maxProgress) * 100;
+        }
+        
+        // 新建築按類型優先級
+        switch (building.type) {
+            case 'castle': return 100;
+            case 'house': return 80;
+            case 'tower': return 60;
+            case 'farm': return 40;
+            default: return 20;
+        }
+    }
+    
+    // 優先處理未完成的建築（白天第一件事）
+    prioritizeUnfinishedBuildings() {
+        const unfinishedBuildings = [];
+        
+        // 收集所有未完成的建築
+        const allBuildings = [
+            ...this.buildingManager.castles, 
+            ...this.buildingManager.towers, 
+            ...this.buildingManager.houses, 
+            ...this.buildingManager.farms.filter(farm => farm.isUnderConstruction)
+        ];
+        
+        allBuildings.forEach(building => {
+            if (building.isUnderConstruction) {
+                const progress = building.constructionProgress || 0;
+                const maxProgress = building.constructionRequired || 100;
+                const progressPercent = (progress / maxProgress) * 100;
+                
+                unfinishedBuildings.push({
+                    building,
+                    progress,
+                    progressPercent,
+                    currentWorkers: building.constructionWorkers.length,
+                    maxWorkers: building.maxWorkers
+                });
+            }
+        });
+        
+        if (unfinishedBuildings.length > 0) {
+            // 按進度降序排序，優先完成進度最高的建築
+            unfinishedBuildings.sort((a, b) => b.progressPercent - a.progressPercent);
+            
+            console.log(`發現 ${unfinishedBuildings.length} 個未完成的建築:`);
+            unfinishedBuildings.forEach(({building, progressPercent, currentWorkers, maxWorkers}) => {
+                console.log(`- ${building.type}: ${progressPercent.toFixed(1)}% (工人: ${currentWorkers}/${maxWorkers})`);
+            });
+            
+            // 為進度最高的建築分配足夠的工人
+            const topBuilding = unfinishedBuildings[0];
+            if (topBuilding.currentWorkers < topBuilding.maxWorkers) {
+                const needed = topBuilding.maxWorkers - topBuilding.currentWorkers;
+                console.log(`優先為 ${topBuilding.building.type} (${topBuilding.progressPercent.toFixed(1)}%) 分配 ${needed} 個工人`);
+                
+                this.assignWorkersToBuilding(topBuilding.building, needed, true); // true = 高優先級
+            }
+        }
+    }
+    
+    // 為特定建築分配工人
+    assignWorkersToBuilding(building, needed, highPriority = false) {
+        let assigned = 0;
+        
+        for (const villager of this.villagers.values()) {
+            if (assigned >= needed) break;
+            
+            // 高優先級模式：可以從農田調派工人
+            const canAssign = highPriority ?
+                (villager.state === 'idle' || villager.state === 'farming' || 
+                 villager.state === 'harvestingFarm' || villager.state === 'movingToFarm' ||
+                 villager.state === 'chopping' || villager.state === 'movingToTree') :
+                (villager.state === 'idle' || villager.state === 'chopping' || 
+                 villager.state === 'movingToTree');
+                
+            if (canAssign && !villager.constructionBuilding && !villager.firstCastleMode) {
+                // 清理現有工作
+                if (villager.workingFarm) {
+                    console.log(`從農田調派村民 ${villager.id} 去完成重要建築`);
+                    villager.workingFarm.removeWorker?.(villager);
+                    villager.workingFarm = null;
+                }
+                
+                villager.choppingTree = null;
+                villager.choppingProgress = 0;
+                villager.path = [];
+                villager.target = null;
+                
+                // 分配到建築工作
+                if (building.addWorker(villager)) {
+                    villager.constructionBuilding = building;
+                    villager.state = 'constructing';
+                    assigned++;
+                    console.log(`分配村民 ${villager.id} 到建築 ${building.type} (優先級: ${highPriority ? '高' : '普通'})`);
+                }
+            }
+        }
+        
+        return assigned;
     }
 
     // 驗證農田分配的正確性
@@ -1669,6 +1825,160 @@ class VillagerManager {
         console.log(`可見村民: ${visibleCount}, 隱藏村民: ${hiddenCount}`);
         console.log('=== 報告結束 ===');
     }
+    
+    // 調試：打印所有建築的詳細狀態
+    debugPrintAllBuildings() {
+        console.log('=== 建築狀態調試報告 ===');
+        
+        const allBuildings = [
+            ...this.buildingManager.castles.map(b => ({...b, type: 'castle'})), 
+            ...this.buildingManager.towers.map(b => ({...b, type: 'tower'})), 
+            ...this.buildingManager.houses.map(b => ({...b, type: 'house'})), 
+            ...this.buildingManager.farms.map(b => ({...b, type: 'farm'}))
+        ];
+        
+        const underConstruction = allBuildings.filter(b => b.isUnderConstruction);
+        const completed = allBuildings.filter(b => b.isComplete);
+        
+        console.log(`總建築數: ${allBuildings.length} (建設中: ${underConstruction.length}, 已完成: ${completed.length})`);
+        
+        if (underConstruction.length > 0) {
+            console.log('=== 建設中的建築 ===');
+            underConstruction.forEach(building => {
+                const progress = building.constructionProgress || 0;
+                const maxProgress = building.constructionRequired || building.totalBuildSteps || 100;
+                const progressPercent = (progress / maxProgress) * 100;
+                const workers = building.constructionWorkers?.length || 0;
+                const maxWorkers = building.maxWorkers || building.requiredWorkers || 1;
+                
+                console.log(`${building.type} at (${building.x}, ${building.z}):`);
+                console.log(`  進度: ${progress}/${maxProgress} (${progressPercent.toFixed(1)}%)`);
+                console.log(`  工人: ${workers}/${maxWorkers}`);
+                console.log(`  狀態: isUnderConstruction=${building.isUnderConstruction}, isComplete=${building.isComplete}`);
+                
+                // 檢查工人狀態
+                if (building.constructionWorkers && building.constructionWorkers.length > 0) {
+                    console.log(`  工人詳情:`);
+                    building.constructionWorkers.forEach(worker => {
+                        console.log(`    - ${worker.id}: 狀態=${worker.state}, 建築目標=${worker.constructionBuilding ? worker.constructionBuilding.type : '無'}`);
+                    });
+                }
+                
+                // 檢查是否需要修復
+                if (building.isUnderConstruction && workers === 0) {
+                    console.warn(`  ⚠️ 警告: 建築需要工人但沒有分配！`);
+                } else if (!building.isUnderConstruction && !building.isComplete) {
+                    console.warn(`  ⚠️ 警告: 建築狀態異常 - 既不在建設中也未完成！`);
+                }
+            });
+        }
+        
+        console.log('=== 建築報告結束 ===');
+        
+        // 檢查並修復問題建築
+        this.fixBrokenBuildings();
+    }
+    
+    // 修復狀態異常的建築
+    fixBrokenBuildings() {
+        const allBuildings = [
+            ...this.buildingManager.castles, 
+            ...this.buildingManager.towers, 
+            ...this.buildingManager.houses, 
+            ...this.buildingManager.farms
+        ];
+        
+        let fixedCount = 0;
+        allBuildings.forEach(building => {
+            // 檢查建築位置是否有效
+            if (building.z === undefined || building.z === null || isNaN(building.z)) {
+                console.warn(`修復建築 ${building.type}: 無效的z坐標 ${building.z}，重新設定為x坐標值`);
+                building.z = building.x || 0; // 使用x坐標或預設值0
+                fixedCount++;
+            }
+            
+            // 修復狀態異常的建築
+            if (!building.isUnderConstruction && !building.isComplete) {
+                const progress = building.constructionProgress || 0;
+                const maxProgress = building.constructionRequired || building.totalBuildSteps || 100;
+                
+                if (progress >= maxProgress) {
+                    // 進度已滿但未標記為完成
+                    console.warn(`修復建築 ${building.type}: 進度已滿但未標記為完成`);
+                    building.isComplete = true;
+                    building.isUnderConstruction = false;
+                    building.onConstructionComplete?.();
+                    fixedCount++;
+                } else {
+                    // 進度未滿，應該標記為建設中
+                    console.warn(`修復建築 ${building.type}: 進度未滿但未標記為建設中`);
+                    building.isUnderConstruction = true;
+                    building.isComplete = false;
+                    fixedCount++;
+                }
+            }
+            
+            // 修復工人與建築的關聯問題
+            if (building.isUnderConstruction && building.constructionWorkers) {
+                let invalidWorkers = [];
+                building.constructionWorkers.forEach(worker => {
+                    if (!worker || !worker.constructionBuilding || worker.constructionBuilding !== building) {
+                        invalidWorkers.push(worker);
+                    }
+                });
+                
+                // 移除無效工人
+                if (invalidWorkers.length > 0) {
+                    console.warn(`建築 ${building.type} 有 ${invalidWorkers.length} 個無效工人引用，正在清理...`);
+                    building.constructionWorkers = building.constructionWorkers.filter(worker => 
+                        worker && worker.constructionBuilding === building
+                    );
+                    fixedCount++;
+                }
+                
+                // 重新同步村民的建築引用
+                building.constructionWorkers.forEach(worker => {
+                    if (worker.constructionBuilding !== building) {
+                        console.warn(`修復村民 ${worker.id} 的建築引用`);
+                        worker.constructionBuilding = building;
+                        worker.state = 'constructing';
+                        fixedCount++;
+                    }
+                });
+            }
+            
+            // 檢查工人分配問題
+            if (building.isUnderConstruction && (!building.constructionWorkers || building.constructionWorkers.length === 0)) {
+                console.warn(`建築 ${building.type} 需要重新分配工人`);
+                setTimeout(() => {
+                    this.ensureConstructionWorkersAssigned();
+                }, 100);
+            }
+            
+            // 檢查停滯的建築（有工人但進度為0且持續一段時間）
+            if (building.isUnderConstruction && 
+                building.constructionWorkers && 
+                building.constructionWorkers.length > 0 && 
+                (building.constructionProgress || 0) === 0) {
+                
+                console.warn(`建築 ${building.type} 有工人但進度停滯，重新啟動建造...`);
+                // 重新觸發建造邏輯
+                building.constructionWorkers.forEach(worker => {
+                    worker.state = 'idle'; // 重置狀態
+                    worker.target = null;
+                    worker.path = [];
+                    setTimeout(() => {
+                        worker.state = 'constructing'; // 重新開始建造
+                    }, 200);
+                });
+                fixedCount++;
+            }
+        });
+        
+        if (fixedCount > 0) {
+            console.log(`修復了 ${fixedCount} 個狀態異常的建築`);
+        }
+    }
 
     // 獲取所有村民
     getAllVillagers() {
@@ -1769,5 +2079,59 @@ class VillagerManager {
         }
         
         console.log(`重新分配完成，處理了 ${idleCount} 個空閒村民`);
+    }
+    
+    // 強制修復停滯的建築
+    forceFixStuckBuildings() {
+        console.log('=== 強制修復停滯建築 ===');
+        
+        const allBuildings = [
+            ...this.buildingManager.castles, 
+            ...this.buildingManager.towers, 
+            ...this.buildingManager.houses, 
+            ...this.buildingManager.farms
+        ];
+        
+        let fixedCount = 0;
+        allBuildings.forEach(building => {
+            if (building.isUnderConstruction && 
+                building.constructionWorkers && 
+                building.constructionWorkers.length > 0) {
+                
+                console.log(`檢查建築 ${building.type} at (${building.x}, ${building.z})`);
+                
+                // 清理並重新分配工人
+                const workers = [...building.constructionWorkers];
+                building.constructionWorkers = [];
+                
+                workers.forEach(worker => {
+                    if (worker && this.villagers.has(worker.id)) {
+                        console.log(`重新分配工人 ${worker.id}`);
+                        
+                        // 清理工人狀態
+                        worker.constructionBuilding = null;
+                        worker.state = 'idle';
+                        worker.target = null;
+                        worker.path = [];
+                        worker.choppingTree = null;
+                        worker.choppingProgress = 0;
+                        
+                        // 重新分配到建築
+                        setTimeout(() => {
+                            if (building.addWorker(worker)) {
+                                worker.constructionBuilding = building;
+                                worker.state = 'constructing';
+                                console.log(`成功重新分配工人 ${worker.id} 到建築 ${building.type}`);
+                            }
+                        }, 100);
+                        
+                        fixedCount++;
+                    }
+                });
+            }
+        });
+        
+        console.log(`強制修復完成，處理了 ${fixedCount} 個工人重新分配`);
+        return fixedCount;
     }
 }

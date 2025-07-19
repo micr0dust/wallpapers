@@ -159,8 +159,22 @@
             }
         };
         
+        // 強制修復停滯建築的函數
+        window.fixBuildings = function() {
+            if (game.world) {
+                const fixed = game.world.forceFixBuildings();
+                console.log(`修復操作完成，處理了 ${fixed} 個問題`);
+                return fixed;
+            } else {
+                console.log('遊戲世界尚未初始化');
+                return 0;
+            }
+        };
+        
         // 在控制台提示調試命令
-        console.log('調試命令已載入。使用 debugVillagers() 來檢查村民狀態');
+        console.log('調試命令已載入:');
+        console.log('- debugVillagers() : 檢查村民和建築狀態');
+        console.log('- fixBuildings() : 強制修復停滯的建築');
     </script>
 </body>
 </html>

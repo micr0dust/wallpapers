@@ -856,11 +856,24 @@ class World {
         if (this.villagerManager) {
             this.villagerManager.debugPrintAllVillagers();
             
+            // 同時檢查建築狀態
+            this.villagerManager.debugPrintAllBuildings();
+            
             // 強制檢查村民可見性
             const isNight = this.lightingSystem.timeOfDay > 0.75 || this.lightingSystem.timeOfDay < 0.25;
             this.villagerManager.checkVillagerVisibility(isNight);
         } else {
             console.log('村民管理器尚未初始化');
+        }
+    }
+    
+    // 強制修復停滯的建築
+    forceFixBuildings() {
+        if (this.villagerManager) {
+            return this.villagerManager.forceFixStuckBuildings();
+        } else {
+            console.log('村民管理器尚未初始化');
+            return 0;
         }
     }
 
