@@ -1,0 +1,94 @@
+{
+    "contentrating" : "Everyone",
+    "description" : "古文明發展世界 - 觀看古代文明在您的桌面上逐漸發展壯大",
+    "file" : "index.html",
+    "general" : 
+    {
+        "properties" : 
+        {
+            "gameSpeed" : 
+            {
+                "condition" : "",
+                "index" : 0,
+                "max" : 3.0,
+                "min" : 0.1,
+                "order" : 100,
+                "step" : 0.1,
+                "text" : "遊戲速度",
+                "type" : "slider",
+                "value" : 1.0
+            },
+            "treeCount" : 
+            {
+                "condition" : "",
+                "index" : 1,
+                "max" : 500,
+                "min" : 100,
+                "order" : 101,
+                "step" : 10,
+                "text" : "樹木數量",
+                "type" : "slider",
+                "value" : 300
+            },
+            "cameraHeight" : 
+            {
+                "condition" : "",
+                "index" : 2,
+                "max" : 150,
+                "min" : 30,
+                "order" : 102,
+                "step" : 10,
+                "text" : "相機高度",
+                "type" : "slider",
+                "value" : 80
+            },
+            "cameraRadius" : 
+            {
+                "condition" : "",
+                "index" : 3,
+                "max" : 250,
+                "min" : 80,
+                "order" : 103,
+                "step" : 10,
+                "text" : "相機距離",
+                "type" : "slider",
+                "value" : 150
+            },
+            "rotationSpeed" : 
+            {
+                "condition" : "",
+                "index" : 4,
+                "max" : 0.01,
+                "min" : 0.0,
+                "order" : 104,
+                "step" : 0.001,
+                "text" : "旋轉速度",
+                "type" : "slider",
+                "value" : 0.002
+            },
+            "fogEnabled" : 
+            {
+                "condition" : "",
+                "index" : 5,
+                "order" : 105,
+                "text" : "啟用霧效果",
+                "type" : "bool",
+                "value" : true
+            },
+            "autoPlay" : 
+            {
+                "condition" : "",
+                "index" : 6,
+                "order" : 106,
+                "text" : "自動遊戲",
+                "type" : "bool",
+                "value" : true
+            }
+        }
+    },
+    "preview" : "preview.jpg",
+    "tags" : ["Ancient", "Civilization", "3D", "City Building", "Strategy", "Relaxing"],
+    "title" : "古文明世界 Mini World",
+    "type" : "web",
+    "version" : 1
+}

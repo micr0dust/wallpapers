@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>古文明世界 - Mini World</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+            background: #000;
+        }
+        
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+        
+        .ui-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: linear-gradient(135deg, rgba(0, 0, 0, 0.9), rgba(30, 30, 30, 0.8));
+            padding: 10px 20px;
+            font-size: 14px;
+            z-index: 100;
+            backdrop-filter: blur(5px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .navbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+        
+        .resource-section {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .resource-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 13px;
+            color: #fff;
+        }
+        
+        .resource-icon {
+            font-size: 16px;
+            width: 20px;
+            text-align: center;
+        }
+        
+        .control-section {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .control-button {
+            background: rgba(76, 175, 80, 0.8);
+            color: white;
+            border: none;
+            padding: 6px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            transition: all 0.3s ease;
+        }
+        
+        .control-button:hover {
+            background: rgba(69, 160, 73, 0.9);
+            transform: translateY(-1px);
+        }
+        
+        .control-button:disabled {
+            background: rgba(102, 102, 102, 0.5);
+            cursor: not-allowed;
+            transform: none;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    
+    <div class="ui-overlay">
+        <div class="navbar">
+            <div class="resource-section">
+                <div class="resource-item">
+                    <span class="resource-icon">🌲</span>
+                    <span id="wood-count">0</span>
+                </div>
+                <div class="resource-item">
+                    <span class="resource-icon">🏠</span>
+                    <span id="population">0</span>
+                </div>
+                <div class="resource-item">
+                    <span class="resource-icon">👷</span>
+                    <span id="villagers">0</span>
+                </div>
+                <div class="resource-item">
+                    <span class="resource-icon">👩‍🌾</span>
+                    <span id="farm-workers">0</span>
+                </div>
+                <div class="resource-item">
+                    <span class="resource-icon">🕐</span>
+                    <span id="time-display">12:00</span>
+                </div>
+            </div>
+            
+            <div class="control-section">
+                <button class="control-button" id="pause-btn">
+                    <span>⏸️</span>
+                    <span>暫停</span>
+                </button>
+                <button class="control-button" id="speed-up">
+                    <span>⚡</span>
+                    <span>1.0x</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Three.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    
+    <!-- 遊戲核心類別 -->
+    <script src="world.js"></script>
+    <script src="grid.js"></script>
+    <script src="camera-controller.js"></script>
+    <script src="buildings.js"></script>
+    <script src="villager.js"></script>
+    <script src="tree.js"></script>
+    <script src="game.js"></script>
+    
+    <!-- 主要遊戲啟動 -->
+    <script>
+        const game = new Game();
+        game.init();
+    </script>
+</body>
+</html>

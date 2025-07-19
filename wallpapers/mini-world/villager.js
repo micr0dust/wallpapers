@@ -1,0 +1,1554 @@
+// 村民類別
+class Villager {
+    constructor(x, z, grid, scene, buildingManager, villagerManager = null) {
+        this.x = x;
+        this.z = z;
+        this.grid = grid;
+        this.scene = scene;
+        this.buildingManager = buildingManager;
+        this.villagerManager = villagerManager; // 引用villagerManager來更新資源庫存
+        
+        // 村民狀態
+        this.wood = 0; // 攜帶的木材數量
+        this.food = 0; // 攜帶的食物數量
+        this.state = 'idle'; // idle, movingToTree, chopping, movingToCastle, movingToFarm, farming, harvestingFarm, hiding, movingToShelter, movingToConstruction, constructing
+        this.target = null;
+        this.path = [];
+        this.moveSpeed = 0.5; // 每2tick走一步
+        this.lastMoveTime = 0;
+        this.moveInterval = 1000 / 30; // 每2tick (2/60秒) = 1000/30毫秒
+        
+        // 工作狀態
+        this.workingFarm = null;
+        this.choppingTree = null;
+        this.choppingProgress = 0;
+        this.harvestProgress = 0;
+        this.constructionBuilding = null; // 正在建造的建築
+        
+        // 夜晚躲避狀態
+        this.shelterBuilding = null; // 躲避的建築
+        this.isNight = false; // 夜晚標記
+        this.wasDaytime = true; // 上次是否為白天
+        
+        // 第一棟城堡建造模式
+        this.firstCastleMode = false; // 是否在第一棟城堡建造模式
+        this.castleCenter = null; // 城堡中心位置
+        this.lastRandomMoveTime = 0; // 上次隨機移動時間
+        this.randomMoveInterval = 3000; // 隨機移動間隔（3秒）
+        
+        this.id = this.generateId();
+        this.create();
+    }
+
+    generateId() {
+        return `villager_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    }
+
+    create() {
+        // 創建簡單的村民外觀（圓柱體加球體）
+        const group = new THREE.Group();
+        
+        // 身體（圓柱體）
+        const bodyGeometry = new THREE.CylinderGeometry(0.3, 0.3, 1.5, 8);
+        const bodyMaterial = new THREE.MeshLambertMaterial({ color: 0x8B4513 });
+        const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial);
+        bodyMesh.position.y = 0.75;
+        group.add(bodyMesh);
+        
+        // 頭部（球體）
+        const headGeometry = new THREE.SphereGeometry(0.3, 8, 6);
+        const headMaterial = new THREE.MeshLambertMaterial({ color: 0xFFDBB3 });
+        const headMesh = new THREE.Mesh(headGeometry, headMaterial);
+        headMesh.position.y = 1.8;
+        group.add(headMesh);
+        
+        this.mesh = group;
+        this.mesh.position.set(this.x, 0, this.z);
+        this.mesh.visible = true; // 確保初始狀態是可見的
+        this.scene.add(this.mesh);
+    }
+
+    update(currentTime, treeManager, isNight = false) {
+        // 更新夜晚狀態
+        this.updateNightState(isNight);
+        
+        // 安全檢查：確保白天時村民是可見的（除非在躲避狀態）
+        if (!isNight && this.state !== 'hiding' && this.mesh && !this.mesh.visible) {
+            this.setVisibility(true);
+        }
+        
+        // 處理第一棟城堡建造模式的隨機移動
+        if (this.firstCastleMode && this.castleCenter) {
+            this.updateFirstCastleMovement(currentTime);
+        }
+        
+        // 移動邏輯
+        if (currentTime - this.lastMoveTime >= this.moveInterval) {
+            this.move();
+            this.lastMoveTime = currentTime;
+        }
+        
+        // 狀態機邏輯
+        this.updateStateMachine(treeManager);
+    }
+
+    move() {
+        if (this.path.length > 0) {
+            const nextPos = this.path.shift();
+            this.x = nextPos.x;
+            this.z = nextPos.z;
+            
+            // 計算村民的高度位置
+            let yPosition = 0; // 預設地面高度
+            
+            // 只有在村民已經到達建造位置且靜止時才調整高度
+            // 移動過程中保持在地面，避免漂浮效果
+            if (this.state === 'constructing' && this.targetBuildPosition && this.path.length === 0) {
+                // 檢查是否已到達目標位置
+                const currentGridPos = this.grid.worldToGrid(this.x, this.z);
+                const targetDistance = Math.abs(currentGridPos.x - this.targetBuildPosition.x) + 
+                                     Math.abs(currentGridPos.y - this.targetBuildPosition.y);
+                
+                if (targetDistance <= 1) {
+                    // 已到達建造位置，調整高度
+                    yPosition = this.targetBuildPosition.z * 3; // 每層高度3單位
+                }
+            }
+            
+            this.mesh.position.set(this.x, yPosition, this.z);
+            
+            // 如果到達目標
+            if (this.path.length === 0) {
+                this.onReachTarget();
+            }
+        } else if (this.target) {
+            // 沒有路徑但有目標，檢查是否已經在目標附近
+            const distance = Math.sqrt(
+                Math.pow(this.x - this.target.x, 2) +
+                Math.pow(this.z - this.target.z, 2)
+            );
+            
+            // 如果距離很近，直接觸發到達目標
+            if (distance < 1.5) {
+                this.onReachTarget();
+            }
+        }
+    }
+
+    updateStateMachine(treeManager) {
+        switch (this.state) {
+            case 'idle':
+                this.handleIdleState(treeManager);
+                break;
+            case 'movingToTree':
+                // 移動邏輯在move()中處理
+                break;
+            case 'chopping':
+                this.handleChoppingState(treeManager);
+                break;
+            case 'movingToCastle':
+                // 檢查是否已經到達城堡但沒有正確觸發狀態轉換
+                if (this.target && this.path.length === 0) {
+                    const distance = Math.sqrt(
+                        Math.pow(this.x - this.target.x, 2) +
+                        Math.pow(this.z - this.target.z, 2)
+                    );
+                    
+                    if (distance < 3.0) {
+                        // 已經到達城堡，手動觸發狀態轉換
+                        this.onReachTarget();
+                    } else {
+                        // 重新尋找最近的城堡
+                        const gridPos = this.grid.worldToGrid(this.x, this.z);
+                        const nearestCastle = this.grid.findNearestCastle(gridPos.x, gridPos.y, this.buildingManager);
+                        if (nearestCastle) {
+                            this.target = nearestCastle;
+                            this.createPath(nearestCastle.x, nearestCastle.y);
+                        } else {
+                            this.state = 'idle';
+                            this.target = null;
+                        }
+                    }
+                }
+                break;
+            case 'movingToFarm':
+                // 檢查是否已經到達農田但沒有正確觸發狀態轉換
+                if (this.target && this.path.length === 0) {
+                    const distance = Math.sqrt(
+                        Math.pow(this.x - this.target.x, 2) +
+                        Math.pow(this.z - this.target.z, 2)
+                    );
+                    
+                    if (distance < 2.0) {
+                        // 已經到達農田，手動觸發狀態轉換
+                        this.onReachTarget();
+                    } else if (this.workingFarm && this.workingFarm.isComplete) {
+                        // 距離較遠但農田有效，重新創建路徑
+                        const worldPos = this.workingFarm.getWorldPosition();
+                        const gridPos = this.grid.worldToGrid(worldPos.x, worldPos.z);
+                        this.createPath(gridPos.x, gridPos.y);
+                    } else {
+                        // 農田無效，重置為idle
+                        if (this.workingFarm) {
+                            this.workingFarm.removeWorker?.(this);
+                            this.workingFarm = null;
+                        }
+                        this.state = 'idle';
+                        this.target = null;
+                    }
+                }
+                break;
+            case 'farming':
+                this.handleFarmingState();
+                break;
+            case 'harvestingFarm':
+                this.handleHarvestingState();
+                break;
+            case 'movingToShelter':
+                // 檢查是否失去目標或路徑
+                if (!this.target || this.path.length === 0) {
+                    // 重新尋找避難所或直接躲避
+                    if (this.shelterBuilding && this.shelterBuilding.isComplete) {
+                        const centerX = this.shelterBuilding.x + Math.floor(this.shelterBuilding.width / 2);
+                        const centerY = this.shelterBuilding.y + Math.floor(this.shelterBuilding.height / 2);
+                        this.target = this.grid.gridToWorld(centerX, centerY);
+                        this.createPath(centerX, centerY);
+                    } else {
+                        this.findNearestShelter();
+                    }
+                }
+                break;
+            case 'hiding':
+                this.handleHidingState();
+                break;
+            case 'movingToConstruction':
+                // 檢查建築是否還存在且未完成
+                if (!this.constructionBuilding || this.constructionBuilding.isComplete) {
+                    this.constructionBuilding = null;
+                    this.target = null;
+                    this.path = [];
+                    this.state = 'idle';
+                } else if (this.path.length === 0 && this.target) {
+                    // 如果失去路徑但有目標，重新創建路徑
+                    const worldPos = this.constructionBuilding.getWorldPosition();
+                    const gridPos = this.grid.worldToGrid(worldPos.x, worldPos.z);
+                    this.createPath(gridPos.x, gridPos.y);
+                }
+                break;
+            case 'constructing':
+                this.handleConstructingState();
+                break;
+        }
+        
+        // 安全檢查：如果村民處於 idle 狀態但有目標或路徑，可能是狀態不一致，需要清理
+        if (this.state === 'idle' && (this.target || this.path.length > 0)) {
+            // 特殊情況：如果是在進行隨機移動，允許保持目標和路徑
+            // 但如果目標距離過遠或其他異常情況，清理狀態
+            if (this.target) {
+                const distance = Math.sqrt(
+                    Math.pow(this.x - this.target.x, 2) +
+                    Math.pow(this.z - this.target.z, 2)
+                );
+                
+                // 如果目標距離過遠（可能是錯誤的狀態），清理它
+                if (distance > 20) {
+                    this.target = null;
+                    this.path = [];
+                }
+            }
+        }
+    }
+
+    // 檢查是否為夜晚時間（18:00後）
+    isNightTime() {
+        // 如果已經明確標記為夜晚
+        if (this.isNight) {
+            return true;
+        }
+        
+        // 從全局或場景中獲取當前時間
+        if (window.gameTime && window.gameTime.currentHour !== undefined) {
+            return window.gameTime.currentHour >= 18 || window.gameTime.currentHour < 6;
+        }
+        
+        // 備用方案：使用isNight標記
+        return this.isNight;
+    }
+
+    // 更新夜晚狀態
+    updateNightState(isNight) {
+        const wasNight = this.isNight;
+        this.isNight = isNight;
+        
+        // 如果剛剛變成夜晚
+        if (isNight && !wasNight) {
+            this.handleNightfall();
+        }
+        // 如果剛剛變成白天
+        else if (!isNight && wasNight) {
+            this.handleDaybreak();
+        }
+    }
+
+    // 處理夜晚來臨
+    handleNightfall() {
+        // 如果不是在躲避狀態，則尋找最近的建築躲避
+        if (this.state !== 'hiding' && this.state !== 'movingToShelter') {
+            this.findNearestShelter();
+        }
+    }
+
+    // 處理白天來臨
+    handleDaybreak() {
+        // 如果在躲避狀態，恢復到idle狀態
+        if (this.state === 'hiding') {
+            this.state = 'idle';
+            this.shelterBuilding = null;
+            // 讓村民重新可見，造成從屋內走出的視覺效果
+            this.setVisibility(true);
+        }
+    }
+
+    // 尋找最近的避難所（不含農田）
+    findNearestShelter() {
+        const gridPos = this.grid.worldToGrid(this.x, this.z);
+        let nearestBuilding = null;
+        let nearestDistance = Infinity;
+        
+        // 檢查城堡
+        this.buildingManager.castles.forEach(castle => {
+            if (castle.isComplete) { // 只檢查完成的建築
+                const distance = Math.abs(castle.x - gridPos.x) + Math.abs(castle.y - gridPos.y);
+                if (distance < nearestDistance) {
+                    nearestDistance = distance;
+                    nearestBuilding = castle;
+                }
+            }
+        });
+        
+        // 檢查塔樓
+        this.buildingManager.towers.forEach(tower => {
+            if (tower.isComplete) { // 只檢查完成的建築
+                const distance = Math.abs(tower.x - gridPos.x) + Math.abs(tower.y - gridPos.y);
+                if (distance < nearestDistance) {
+                    nearestDistance = distance;
+                    nearestBuilding = tower;
+                }
+            }
+        });
+        
+        // 檢查房舍
+        this.buildingManager.houses.forEach(house => {
+            if (house.isComplete) { // 只檢查完成的建築
+                const distance = Math.abs(house.x - gridPos.x) + Math.abs(house.y - gridPos.y);
+                if (distance < nearestDistance) {
+                    nearestDistance = distance;
+                    nearestBuilding = house;
+                }
+            }
+        });
+        
+        if (nearestBuilding) {
+            this.shelterBuilding = nearestBuilding;
+            this.state = 'movingToShelter';
+            // 移動到建築中心
+            const centerX = nearestBuilding.x + Math.floor(nearestBuilding.width / 2);
+            const centerY = nearestBuilding.y + Math.floor(nearestBuilding.height / 2);
+            
+            // 設置目標點，方便追蹤
+            this.target = this.grid.gridToWorld(centerX, centerY);
+            this.createPath(centerX, centerY);
+            
+        } else {
+            // 找不到可躲避的建築，保持當前狀態但不移動
+            this.state = 'hiding'; // 直接進入躲避狀態，就地躲避
+        }
+    }
+
+    // 處理躲避狀態
+    handleHidingState() {
+        // 在躲避狀態下，村民什麼都不做，只是等待天亮
+        // 可以在這裡添加一些動畫效果或者其他邏輯
+    }
+
+    // 處理第一棟城堡建造模式
+    handleFirstCastleConstruction() {
+        // 在第一棟城堡建造模式下，村民會圍繞城堡隨機走動
+        // 如果村民沒有移動路徑，立即開始新的隨機移動
+        if (this.path.length === 0) {
+            this.startRandomCastleMovement();
+        }
+    }
+
+    // 更新第一棟城堡建造模式的移動
+    updateFirstCastleMovement(currentTime) {
+        // 如果村民正在建造工作，不要打斷
+        if (this.state === 'constructing') {
+            return;
+        }
+        
+        // 如果村民沒有移動路徑，立即開始新的隨機移動
+        if (this.path.length === 0) {
+            this.startRandomCastleMovement();
+        }
+    }
+
+    // 開始圍繞城堡的隨機移動
+    startRandomCastleMovement() {
+        if (!this.castleCenter) return;
+        
+        // 在城堡周圍的假想圓弧上隨機選擇一個點
+        const radius = 5 + Math.random() * 3; // 5-8格的隨機半徑，形成圓弧範圍
+        const angle = Math.random() * Math.PI * 2; // 完整圓周的隨機角度
+        
+        const targetX = this.castleCenter.x + Math.cos(angle) * radius;
+        const targetY = this.castleCenter.y + Math.sin(angle) * radius;
+        
+        // 確保目標位置在地圖範圍內
+        const clampedX = Math.max(0, Math.min(this.grid.size - 1, Math.round(targetX)));
+        const clampedY = Math.max(0, Math.min(this.grid.size - 1, Math.round(targetY)));
+        
+        // 直接創建直線路徑到目標位置（會穿過城堡）
+        this.createPath(clampedX, clampedY);
+    }
+
+    handleIdleState(treeManager) {
+        // 如果是夜晚，不進行任何工作活動
+        if (this.isNight) {
+            return;
+        }
+        
+        // 最高優先級：檢查是否已分配到未完成的建築工作
+        if (this.constructionBuilding && !this.constructionBuilding.isComplete) {
+
+            // 確保建築的工人列表中有這個村民
+            if (!this.constructionBuilding.constructionWorkers.includes(this)) {
+                this.constructionBuilding.addWorker(this);
+            }
+            
+            this.state = 'constructing';
+            return;
+        }
+        
+        // 特殊處理：第一棟城堡建造模式
+        if (this.firstCastleMode && this.castleCenter) {
+            // 在第一棟城堡模式下，優先嘗試建造工作
+            if (this.tryFindConstructionWork()) {
+                return; // 找到建造工作，結束
+            }
+            // 如果沒有找到建造工作，就隨機走動
+            this.handleFirstCastleConstruction();
+            return;
+        }
+        
+        // 第二優先級：檢查是否有未完成的建築需要建造（會強制打斷其他工作）
+        if (this.tryFindConstructionWorkWithHighestPriority()) {
+            return; // 成功找到建造工作，結束
+        }
+        
+        // 如果攜帶了資源，需要先上繳到城堡（只有完成的城堡才能接收資源）
+        if (this.wood > 0 || this.food > 0) {
+            const gridPos = this.grid.worldToGrid(this.x, this.z);
+            const nearestCastle = this.grid.findNearestCastle(gridPos.x, gridPos.y, this.buildingManager);
+            
+            if (nearestCastle) {
+                if (nearestCastle.distance <= 10) {
+                    // 已經在城堡附近，直接上繳資源
+                    this.deliverResources();
+                    return;
+                } else {
+                    // 需要移動到城堡
+                    this.target = nearestCastle;
+                    this.state = 'movingToCastle';
+                    this.createPath(nearestCastle.x, nearestCastle.y);
+                }
+            }
+            return;
+        }
+        
+        // 檢查是否有完成的城堡（一次檢查，多次使用）
+        const gridPos = this.grid.worldToGrid(this.x, this.z);
+        const nearestCastleForWork = this.grid.findNearestCastle(gridPos.x, gridPos.y, this.buildingManager);
+        const hasCompletedCastle = nearestCastleForWork !== null;
+        
+        // 沒有攜帶資源，優先級順序：建造 > 種田 > 伐木(有城堡時)
+        
+        // 再次檢查是否有建築需要建造（正常優先級）
+        if (this.tryFindConstructionWork()) {
+            return; // 成功找到建造工作，結束
+        }
+        
+        // 其次，嘗試找農田工作（優先度2）
+        if (this.tryFindFarmWork()) {
+            return; // 成功找到農田工作，結束
+        }
+        
+        // 最後，如果有完成的城堡且沒有農田可種，才去砍樹（優先度3）
+        if (hasCompletedCastle) {
+            const nearestTree = this.grid.findNearestTree(gridPos.x, gridPos.y);
+            
+            if (nearestTree) {
+                this.target = nearestTree;
+                this.state = 'movingToTree';
+                this.createPath(nearestTree.x, nearestTree.y);
+                return; // 成功找到砍樹工作，結束
+            }
+        }
+        
+        // 如果既沒有建造、砍樹、農田工作，且不是夜晚，讓村民進行隨機移動避免站著不動
+        if (!this.isNight && this.path.length === 0) {
+            this.startRandomMovement();
+        }
+    }
+    
+    // 開始隨機移動（用於無工作時的閒置狀態）
+    startRandomMovement() {
+        const gridPos = this.grid.worldToGrid(this.x, this.z);
+        
+        // 在村民周圍3-8格範圍內隨機選擇一個點
+        const radius = 3 + Math.random() * 5; // 3-8格的隨機半徑
+        const angle = Math.random() * Math.PI * 2; // 完整圓周的隨機角度
+        
+        const targetX = gridPos.x + Math.cos(angle) * radius;
+        const targetY = gridPos.y + Math.sin(angle) * radius;
+        
+        // 確保目標位置在地圖範圍內
+        const clampedX = Math.max(0, Math.min(this.grid.size - 1, Math.round(targetX)));
+        const clampedY = Math.max(0, Math.min(this.grid.size - 1, Math.round(targetY)));
+        
+        // 只有當目標位置與當前位置不同時才創建路徑
+        if (clampedX !== gridPos.x || clampedY !== gridPos.y) {
+            this.createPath(clampedX, clampedY);
+        }
+    }
+
+    handleChoppingState(treeManager) {
+        if (this.choppingTree) {
+            this.choppingProgress++;
+            
+            // 每10次採伐後樹木消失，村民獲得1木材
+            if (this.choppingProgress >= 10) {
+                this.wood = 1; // 獲得1木材
+                treeManager.chopTree(this.choppingTree.x, this.choppingTree.y);
+                
+                // 清理砍樹相關狀態
+                this.choppingTree = null;
+                this.choppingProgress = 0;
+                this.target = null; // 清除目標
+                this.path = []; // 清除路徑
+                this.state = 'idle'; // 變為閒置狀態
+            }
+        }
+    }
+
+    handleFarmingState() {
+        // 檢查農田是否還存在且已完成建造
+        if (!this.workingFarm || this.workingFarm.needsDestruction?.() || !this.workingFarm.isComplete) {
+            if (this.workingFarm) {
+                this.workingFarm.removeWorker(this);
+            }
+            this.workingFarm = null;
+            this.state = 'idle';
+            this.target = null;
+            this.path = [];
+            return;
+        }
+        
+        // 選擇隨機采集點並移動
+        if (this.workingFarm) {
+            try {
+                const harvestPoint = this.workingFarm.getRandomHarvestPoint();
+                if (!harvestPoint) {
+                    this.state = 'idle';
+                    return;
+                }
+                
+                this.target = harvestPoint;
+                this.state = 'harvestingFarm';
+                this.harvestProgress = 0; // 重置收割進度，確保不會立即完成
+                
+                
+                // 移動到采集點
+                const gridPos = this.grid.worldToGrid(harvestPoint.x, harvestPoint.z);
+                
+                // 確保坐標有效
+                if (gridPos.x >= 0 && gridPos.x < this.grid.size && gridPos.y >= 0 && gridPos.y < this.grid.size) {
+                    this.createPath(gridPos.x, gridPos.y);
+                } else {
+                    // 使用農田中心作為備用
+                    const farmCenter = this.workingFarm.getWorldPosition();
+                    const farmCenterGrid = this.grid.worldToGrid(farmCenter.x, farmCenter.z);
+                    this.target = { x: farmCenter.x, z: farmCenter.z };
+                    this.createPath(farmCenterGrid.x, farmCenterGrid.y);
+                }
+            } catch (error) {
+                this.state = 'idle';
+                this.target = null;
+                this.path = [];
+            }
+        } else {
+            this.state = 'idle';
+            this.target = null;
+            this.path = [];
+        }
+    }
+
+    handleHarvestingState() {
+        // 檢查農田是否還存在且已完成建造
+        if (!this.workingFarm || this.workingFarm.needsDestruction?.() || !this.workingFarm.isComplete) {
+            if (this.workingFarm) {
+                this.workingFarm.removeWorker(this);
+            }
+            this.workingFarm = null;
+            this.state = 'idle';
+            this.harvestProgress = 0;
+            this.target = null;
+            this.path = [];
+            return;
+        }
+
+        // 檢查是否有目標位置
+        if (!this.target) {
+            // 如果沒有目標，重新選擇采集點
+            try {
+                const harvestPoint = this.workingFarm.getRandomHarvestPoint();
+                if (!harvestPoint) {
+                    this.state = 'farming'; // 回到farming狀態重新嘗試
+                    return;
+                }
+                this.target = harvestPoint;
+                
+                const gridPos = this.grid.worldToGrid(harvestPoint.x, harvestPoint.z);
+                if (gridPos.x >= 0 && gridPos.x < this.grid.size && gridPos.y >= 0 && gridPos.y < this.grid.size) {
+                    this.createPath(gridPos.x, gridPos.y);
+                }
+            } catch (error) {
+                this.state = 'idle';
+            }
+            return;
+        }
+
+        // 檢查是否到達目標位置
+        if (!this.target || typeof this.target.x !== 'number' || typeof this.target.z !== 'number') {
+            this.target = null;
+            this.state = 'farming';
+            return;
+        }
+        
+        const distance = Math.sqrt(
+            Math.pow(this.x - this.target.x, 2) +
+            Math.pow(this.z - this.target.z, 2)
+        );
+
+        if (distance < 1.5) {
+            this.harvestProgress++;
+            
+            if (this.harvestProgress >= 5) {
+                // 采集完成，讓村民攜帶食物去上繳，但保持農田分配
+                this.food = 1; // 攜帶食物作為視覺效果
+                this.harvestProgress = 0;
+                
+                // 注意：不要移除 workingFarm 分配，讓村民上繳完食物後能回來
+                // this.workingFarm.removeWorker(this); // 暫時註釋掉
+                // this.workingFarm = null; // 暫時註釋掉
+                this.target = null;
+                this.path = [];
+                this.state = 'idle'; // 設為idle，讓村民去上繳食物
+            }
+        } else if (this.path.length === 0) {
+            // 如果距離目標還很遠但沒有路徑，重新創建路徑
+            const gridPos = this.grid.worldToGrid(this.target.x, this.target.z);
+            if (gridPos.x >= 0 && gridPos.x < this.grid.size && gridPos.y >= 0 && gridPos.y < this.grid.size) {
+                this.createPath(gridPos.x, gridPos.y);
+            } else {
+                this.target = null; // 清除無效目標，下次會重新選擇
+            }
+        }
+    }
+
+    tryFindFarmWork() {
+        // 如果在第一棟城堡建造模式，不分配農田工作
+        if (this.firstCastleMode) {
+            return false;
+        }
+        
+        // 首先檢查是否已經分配到農田且需要回到農田工作
+        if (this.workingFarm && this.workingFarm.isComplete) {
+            // 確保農田知道這個村民是它的工人
+            if (this.workingFarm.workingVillager !== this) {
+                this.workingFarm.setWorker(this);
+            }
+            const worldPos = this.workingFarm.getWorldPosition();
+            this.target = { x: worldPos.x, z: worldPos.z };
+            this.state = 'movingToFarm';
+            
+            const gridPos = this.grid.worldToGrid(worldPos.x, worldPos.z);
+            this.createPath(gridPos.x, gridPos.y);
+            return true;
+        }
+        
+        // 尋找需要工人的已完成農田
+        const availableFarms = this.buildingManager.farms.filter(farm => {
+            return farm.isComplete && !farm.hasWorker();
+        });
+        
+        if (availableFarms.length > 0) {
+            const farm = availableFarms[0];
+            
+            // 嘗試分配到農田
+            if (!farm.setWorker(this)) {
+                return false;
+            }
+            
+            const worldPos = farm.getWorldPosition();
+            this.target = { x: worldPos.x, z: worldPos.z };
+            this.state = 'movingToFarm';
+            this.workingFarm = farm;
+            
+            const gridPos = this.grid.worldToGrid(worldPos.x, worldPos.z);
+            this.createPath(gridPos.x, gridPos.y);
+            
+            return true;
+        }
+        
+        return false;
+    }
+
+    // 嘗試找到建造工作（最高優先級，會強制打斷其他工作）
+    tryFindConstructionWorkWithHighestPriority() {
+        // 檢查是否為夜晚時間（18:00後），如果是則禁止開始新建造
+        if (this.isNightTime()) {
+            return false;
+        }
+        
+        // 找出所有需要工人的建築
+        const buildingsNeedingWorkers = [];
+        
+        // 檢查所有建築類型（但排除已完成的農田，因為它們有獨立的耕種系統）
+        const allBuildings = [
+            ...this.buildingManager.castles, 
+            ...this.buildingManager.towers, 
+            ...this.buildingManager.houses, 
+            ...this.buildingManager.farms.filter(farm => farm.isUnderConstruction) // 只包含建造中的農田
+        ];
+        
+        allBuildings.forEach(building => {
+            // 檢查建築是否需要更多工人，或者工人數不足但仍在建造中
+            if (building.isUnderConstruction && building.constructionWorkers.length < building.maxWorkers) {
+                const worldPos = building.getWorldPosition();
+                const gridPos = this.grid.worldToGrid(worldPos.x, worldPos.z);
+                const distance = Math.abs(this.grid.worldToGrid(this.x, this.z).x - gridPos.x) + 
+                               Math.abs(this.grid.worldToGrid(this.x, this.z).y - gridPos.y);
+                buildingsNeedingWorkers.push({ building, distance });
+            }
+        });
+        
+        if (buildingsNeedingWorkers.length > 0) {
+            // 找到最近的需要工人的建築
+            buildingsNeedingWorkers.sort((a, b) => a.distance - b.distance);
+            const building = buildingsNeedingWorkers[0].building;
+            
+            // 如果村民在農田工作，先離開農田
+            if (this.workingFarm) {
+                this.workingFarm.removeWorker?.(this);
+                this.workingFarm = null;
+            }
+            
+            // 清理當前工作狀態
+            this.choppingTree = null;
+            this.choppingProgress = 0;
+            this.path = [];
+            this.target = null;
+            
+            if (building.addWorker(this)) {
+                this.constructionBuilding = building;
+                this.state = 'constructing';
+                return true;
+            }
+        }
+        
+        return false; // 沒有可用的建造工作
+    }
+
+    // 嘗試找到建造工作
+    tryFindConstructionWork() {
+        // 檢查是否為夜晚時間（18:00後），如果是則禁止開始新建造
+        if (this.isNightTime()) {
+            return false;
+        }
+        
+        // 特殊處理：如果有第一棟城堡且正在特殊模式下
+        if (this.villagerManager && this.villagerManager.firstCastle) {
+            const firstCastle = this.villagerManager.firstCastle;
+            
+            // 檢查第一棟城堡是否需要工人
+            if (firstCastle.needsMoreWorkers && firstCastle.needsMoreWorkers()) {
+                if (firstCastle.addWorker(this)) {
+                    this.constructionBuilding = firstCastle;
+                    this.state = 'constructing';
+                    return true;
+                }
+            }
+            
+            // 如果在第一棟城堡模式下，但第一棟城堡不需要工人，就隨機走動
+            if (this.firstCastleMode) {
+                return false;
+            }
+        }
+        
+        // 正常模式下尋找需要工人的建築
+        const buildingsNeedingWorkers = [];
+        
+        // 檢查所有建築類型（但排除已完成的農田，因為它們有獨立的耕種系統）
+        const allBuildings = [
+            ...this.buildingManager.castles, 
+            ...this.buildingManager.towers, 
+            ...this.buildingManager.houses, 
+            ...this.buildingManager.farms.filter(farm => farm.isUnderConstruction) // 只包含建造中的農田
+        ];
+        
+        allBuildings.forEach(building => {
+            if (building.needsMoreWorkers && building.needsMoreWorkers()) {
+                const worldPos = building.getWorldPosition();
+                const gridPos = this.grid.worldToGrid(worldPos.x, worldPos.z);
+                const distance = Math.abs(this.grid.worldToGrid(this.x, this.z).x - gridPos.x) + 
+                               Math.abs(this.grid.worldToGrid(this.x, this.z).y - gridPos.y);
+                buildingsNeedingWorkers.push({ building, distance });
+            }
+        });
+        
+        if (buildingsNeedingWorkers.length > 0) {
+            // 找到最近的需要工人的建築
+            buildingsNeedingWorkers.sort((a, b) => a.distance - b.distance);
+            const building = buildingsNeedingWorkers[0].building;
+            
+            if (building.addWorker(this)) {
+                this.constructionBuilding = building;
+                this.state = 'constructing';
+                
+                return true;
+            }
+        }
+        
+        return false; // 沒有可用的建造工作
+    }
+
+    // 處理建造狀態
+    handleConstructingState() {
+        // 檢查是否進入夜晚時間，如果是則停止建造並準備躲避
+        if (this.isNightTime()) {
+            // 只清理建造相關的臨時狀態，不清理建築分配
+            // 注意：不清理 this.constructionBuilding，讓夜晚重置邏輯處理
+            this.workPosition = null;
+            this.assignedToPart = null;
+            this.targetBuildPosition = null;
+            this.target = null;
+            this.path = [];
+            this.state = 'idle'; // 設為idle，讓夜晚處理邏輯接管
+            
+            return;
+        }
+        
+        // 檢查建築是否已完成或不存在
+        if (!this.constructionBuilding || this.constructionBuilding.isComplete) {
+            // 清理建造相關狀態
+            if (this.constructionBuilding) {
+                this.constructionBuilding.removeWorker?.(this);
+            }
+            this.constructionBuilding = null;
+            this.workPosition = null;
+            this.assignedToPart = null;
+            this.targetBuildPosition = null;
+            this.target = null;
+            this.path = [];
+            this.state = 'idle';
+            
+            return;
+        }
+        
+        // 檢查是否需要移動到新的建造位置
+        if (this.targetBuildPosition) {
+            const currentGridPos = this.grid.worldToGrid(this.x, this.z);
+            const targetDistance = Math.abs(currentGridPos.x - this.targetBuildPosition.x) + 
+                                 Math.abs(currentGridPos.y - this.targetBuildPosition.y);
+            
+            if (targetDistance > 1) {
+                // 還未到達目標位置，繼續移動
+                if (this.path.length === 0) {
+                    this.createPath(this.targetBuildPosition.x, this.targetBuildPosition.y);
+                }
+                return;
+            } else {
+                // 已到達建造位置
+                this.targetBuildPosition = null; // 清除目標位置
+            }
+        }
+        
+        // 在建造位置等待建造完成，實際的建造邏輯在建築的updateConstruction方法中處理
+    }
+
+    // 個別村民上繳資源到城堡
+    deliverResources() {
+        // 檢查村民是否在城堡附近
+        const gridPos = this.grid.worldToGrid(this.x, this.z);
+        const nearestCastle = this.grid.findNearestCastle(gridPos.x, gridPos.y, this.buildingManager);
+        
+        if (nearestCastle && nearestCastle.distance <= 10) {
+            // 找到對應的城堡建築對象 - 擴大搜尋範圍
+            const castle = this.buildingManager.castles.find(c => {
+                const manhattanDistance = Math.abs(c.x - nearestCastle.x) + Math.abs(c.y - nearestCastle.y);
+                return manhattanDistance <= 10; // 使用曼哈頓距離，擴大到 10
+            });
+            
+            if (this.wood > 0) {
+                // 需要通過villagerManager來更新木材庫存
+                if (this.villagerManager) {
+                    this.villagerManager.woodInventory += this.wood;
+                }
+                this.wood = 0;
+            }
+            
+            if (this.food > 0) {
+                this.food = 0; // 清空攜帶的食物
+            }
+            
+            // 如果村民有分配的農田，讓他們準備回到農田繼續工作
+            if (this.workingFarm && this.workingFarm.isComplete) {
+                // 重設狀態，讓村民回到農田
+                this.state = 'idle';
+                this.target = null;
+            } else {
+                this.state = 'idle';
+                this.target = null;
+            }
+        } else {
+            // 如果找不到城堡，強制重設為閒置狀態，避免卡住
+            this.state = 'idle';
+            this.target = null;
+            
+            // 清空資源，避免一直嘗試上繳
+            if (this.wood > 0 || this.food > 0) {
+                this.wood = 0;
+                this.food = 0;
+            }
+        }
+    }
+
+    createPath(targetGridX, targetGridY) {
+        // 簡單的直線路徑（可以後續改進為A*尋路）
+        const currentGridPos = this.grid.worldToGrid(this.x, this.z);
+        const startX = currentGridPos.x;
+        const startY = currentGridPos.y;
+        
+        const dx = targetGridX - startX;
+        const dy = targetGridY - startY;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        if (distance === 0) {
+            return;
+        }
+        
+        const steps = Math.ceil(distance);
+        this.path = [];
+        
+        for (let i = 1; i <= steps; i++) {
+            const progress = i / steps;
+            const gridX = Math.round(startX + dx * progress);
+            const gridY = Math.round(startY + dy * progress);
+            const worldPos = this.grid.gridToWorld(gridX, gridY);
+            
+            this.path.push({ x: worldPos.x, z: worldPos.z });
+        }
+    }
+
+    onReachTarget() {
+        const gridPos = this.grid.worldToGrid(this.x, this.z);
+        
+        switch (this.state) {
+            case 'movingToTree':
+                if (this.target) {
+                    this.choppingTree = this.target;
+                    this.state = 'chopping';
+                    this.choppingProgress = 0;
+                }
+                break;
+                
+            case 'movingToCastle':
+                // 到達城堡，上繳攜帶的資源
+                
+                // 調用個別村民資源上繳邏輯
+                this.deliverResources();
+                // 注意：不在這裡設定 state，讓 deliverResources 方法負責狀態管理
+                break;
+                
+            case 'movingToFarm':
+                // 到達農田，檢查農田是否完成建造後開始尋找採集點
+                if (this.workingFarm && this.workingFarm.isComplete) {
+                    this.state = 'farming';
+                } else {
+                    if (this.workingFarm) {
+                        this.workingFarm.removeWorker(this);
+                        this.workingFarm = null;
+                    }
+                    this.state = 'idle';
+                }
+                break;
+                
+            case 'harvestingFarm':
+                // 到達新的采集點，繼續采集狀態
+                break;
+                
+            case 'movingToShelter':
+                // 到達避難所，開始躲避
+                this.state = 'hiding';
+                // 讓村民隱形，造成走進屋內的視覺效果
+                this.setVisibility(false);
+                break;
+                
+            case 'movingToConstruction':
+                // 到達建築工地，開始建造
+                if (this.constructionBuilding && !this.constructionBuilding.isComplete) {
+                    this.state = 'constructing';
+                } else {
+                    this.constructionBuilding = null;
+                    this.target = null;
+                    this.state = 'idle';
+                }
+                break;
+                
+            case 'idle':
+                // 處理隨機移動結束的情況 - 清除目標並保持idle狀態
+                this.target = null;
+                break;
+                
+            default:
+                // 處理其他未明確定義的狀態 - 重設為idle
+                this.target = null;
+                this.state = 'idle';
+                break;
+        }
+    }
+
+    // 銷毀村民
+    destroy() {
+        if (this.workingFarm) {
+            this.workingFarm.removeWorker();
+        }
+        
+        if (this.constructionBuilding) {
+            this.constructionBuilding.removeWorker(this);
+        }
+        
+        if (this.mesh) {
+            this.scene.remove(this.mesh);
+            this.mesh = null;
+        }
+        
+        // 清理躲避狀態
+        this.shelterBuilding = null;
+        this.state = 'idle';
+        
+        // 清理第一棟城堡模式
+        this.firstCastleMode = false;
+        this.castleCenter = null;
+    }
+
+    // 設置村民可見性
+    setVisibility(visible) {
+        if (this.mesh) {
+            this.mesh.visible = visible;
+        }
+    }
+
+    // 獲取村民狀態信息
+    getStatus() {
+        return {
+            id: this.id,
+            position: { x: this.x, z: this.z },
+            state: this.state,
+            wood: this.wood,
+            workingFarm: this.workingFarm ? this.workingFarm.id : null
+        };
+    }
+}
+
+// 村民管理器
+class VillagerManager {
+    constructor(grid, scene, buildingManager) {
+        this.grid = grid;
+        this.scene = scene;
+        this.buildingManager = buildingManager;
+        this.villagers = new Map();
+        this.woodInventory = 0;
+        this.wasNight = false; // 追蹤上一次的夜晚狀態
+        this.firstCastleBeingBuilt = false; // 追蹤第一棟城堡建造狀態
+        this.firstCastle = null; // 第一棟城堡的引用
+    }
+
+    // 檢查是否為夜晚時間（18:00後）
+    isNightTime() {
+        // 從全局或場景中獲取當前時間
+        if (window.gameTime && window.gameTime.currentHour !== undefined) {
+            return window.gameTime.currentHour >= 18 || window.gameTime.currentHour < 6;
+        }
+        
+        // 備用方案：使用wasNight標記
+        return this.wasNight;
+    }
+
+    // 創建村民
+    createVillager(x, z) {
+        const villager = new Villager(x, z, this.grid, this.scene, this.buildingManager, this);
+        this.villagers.set(villager.id, villager);
+        return villager;
+    }
+
+    // 更新所有村民
+    update(currentTime, treeManager, isNight = false) {
+        // 檢查第一棟城堡的建造狀態
+        this.updateFirstCastleStatus();
+        
+        // 定期檢查並確保建造工人分配（每5秒檢查一次）
+        if (!this.lastConstructionCheck || currentTime - this.lastConstructionCheck >= 5000) {
+            this.ensureConstructionWorkersAssigned();
+            this.lastConstructionCheck = currentTime;
+        }
+        
+
+        
+        // 檢查是否剛進入夜晚狀態
+        if (isNight && !this.wasNight) {
+            this.resetAllVillagersForNight();
+        }
+        
+        // 檢查是否剛從夜晚轉為白天
+        if (!isNight && this.wasNight) {
+            this.reassignVillagersAfterDawn();
+        }
+        
+        this.wasNight = isNight;
+        
+        for (const villager of this.villagers.values()) {
+            villager.update(currentTime, treeManager, isNight);
+        }
+        
+        // 移除自動收集邏輯，改由個別村民在到達城堡時直接上繳
+        // this.collectWood();
+    }
+
+    collectWood() {
+        for (const villager of this.villagers.values()) {
+            if (villager.state === 'idle' && (villager.wood > 0 || villager.food > 0)) {
+                
+                // 檢查村民是否在城堡附近（傳遞buildingManager以檢查城堡完成狀態）
+                const gridPos = this.grid.worldToGrid(villager.x, villager.z);
+                const nearestCastle = this.grid.findNearestCastle(gridPos.x, gridPos.y, this.buildingManager);
+                
+                if (nearestCastle && nearestCastle.distance <= 10) {
+                    // 找到對應的城堡建築對象（修正坐標匹配）
+                    const castle = this.buildingManager.castles.find(c => {
+                        return Math.abs(c.x - nearestCastle.x) <= 3 && 
+                               Math.abs(c.y - nearestCastle.y) <= 3;
+                    });
+                    
+                    if (villager.wood > 0) {
+                        this.woodInventory += villager.wood;
+                        villager.wood = 0;
+                    }
+                    // 上繳食物（只做視覺效果，不實際增加食物資源）
+                    if (villager.food > 0 && castle) {
+                        villager.food = 0; // 清空攜帶的食物
+                        // 注意：不調用 castle.addFood()，因為我們移除了食物資源系統
+                    }
+                    
+                    // 資源上繳完成
+                    if (villager.wood === 0 && villager.food === 0) {
+                        villager.state = 'idle';
+                        villager.target = null;
+                        villager.path = [];
+                        
+                        // 如果村民有分配的農田，讓他們立即回到農田繼續工作
+                        if (villager.workingFarm && villager.workingFarm.isComplete) {
+                            // 讓村民在下一輪idle處理時直接找到他們的農田工作
+                        } else {
+                            // 重設為閒置狀態
+                        }
+                    }
+                } else {
+                    // 無法找到附近的完成城堡來上繳資源
+                }
+            }
+        }
+    }
+
+    // 夜晚時重置所有村民狀態
+    resetAllVillagersForNight() {
+        for (const villager of this.villagers.values()) {
+            // 保存重要的持久性數據
+            const savedWorkingFarm = villager.workingFarm;
+            const savedWood = villager.wood;
+            const savedFood = villager.food;
+            const savedConstructionBuilding = villager.constructionBuilding;
+            const wasHiding = (villager.state === 'hiding' || villager.state === 'movingToShelter');
+            
+            // 清理可能導致卡住的臨時狀態（包括躲避狀態的村民）
+            villager.path = [];
+            villager.target = null;
+            villager.choppingTree = null;
+            villager.choppingProgress = 0;
+            villager.harvestProgress = 0;
+            
+            // 清理建造相關的臨時狀態，但保持建築分配
+            villager.workPosition = null;
+            villager.assignedToPart = null;
+            villager.targetBuildPosition = null;
+            
+            // 恢復重要數據 - 確保建築分配在所有情況下都被保存
+            villager.workingFarm = savedWorkingFarm;
+            villager.wood = savedWood;
+            villager.food = savedFood;
+            // 只要建築還未完成，就保持分配關係
+            if (savedConstructionBuilding && !savedConstructionBuilding.isComplete) {
+                villager.constructionBuilding = savedConstructionBuilding;
+            } else if (savedConstructionBuilding && savedConstructionBuilding.isComplete) {
+                // 建築已完成，清理分配
+                villager.constructionBuilding = null;
+            } else {
+                villager.constructionBuilding = null;
+            }
+            
+            // 設置為閒置狀態，讓村民在白天時重新尋找工作
+            villager.state = 'idle';
+            
+            // 確保村民在地面上（清理任何高度偏移）
+            if (villager.mesh) {
+                villager.mesh.position.y = 0;
+            }
+            
+            // 如果村民不是原本在躲避狀態，確保他們是可見的
+            if (!wasHiding) {
+                villager.setVisibility(true);
+            }
+        }
+    }
+
+    // 白天時重新分配村民工作
+    reassignVillagersAfterDawn() {
+        // 等待片刻讓所有村民完成從躲避狀態的轉換
+        setTimeout(() => {
+            // 首先確保所有村民都是可見的（修正隱形村民問題）
+            for (const villager of this.villagers.values()) {
+                villager.setVisibility(true);
+            }
+            
+            // 首先確保所有未完成建築有足夠工人（最高優先級）
+            this.ensureConstructionWorkersAssigned();
+            
+            // 重新驗證和清理農田分配
+            this.validateFarmAssignments();
+            
+            // 重新分配閒置村民到農田
+            this.reassignVillagersToFarms();
+            
+            // 確保所有村民狀態正常
+            for (const villager of this.villagers.values()) {
+                if (villager.state === 'idle' && !villager.target && villager.path.length === 0) {
+                    // 強制觸發一次狀態檢查，傳遞null作為treeManager參數
+                    // 由於我們主要關注農田和建造分配，treeManager在這個階段不是必需的
+                }
+            }
+        }, 100); // 延遲100毫秒確保狀態轉換完成
+    }
+
+    // 確保所有未完成建築都有足夠工人（最高優先級）
+    ensureConstructionWorkersAssigned() {
+        // 檢查是否為夜晚時間，如果是則不分配新的建造工作
+        if (this.isNightTime()) {
+            return;
+        }
+        
+        // 第一步：重新激活已經分配給未完成建築的村民
+        for (const villager of this.villagers.values()) {
+            if (villager.constructionBuilding && 
+                !villager.constructionBuilding.isComplete && 
+                villager.state === 'idle') {
+                
+                // 確保建築記錄中有這個工人
+                if (!villager.constructionBuilding.constructionWorkers.includes(villager)) {
+                    villager.constructionBuilding.addWorker(villager);
+                }
+                
+                villager.state = 'constructing';
+            }
+        }
+        
+        // 第二步：找出所有需要工人的建築
+        const buildingsNeedingWorkers = [];
+        
+        const allBuildings = [
+            ...this.buildingManager.castles, 
+            ...this.buildingManager.towers, 
+            ...this.buildingManager.houses, 
+            ...this.buildingManager.farms.filter(farm => farm.isUnderConstruction)
+        ];
+        
+        allBuildings.forEach(building => {
+            if (building.isUnderConstruction && building.constructionWorkers.length < building.maxWorkers) {
+                const shortfall = building.maxWorkers - building.constructionWorkers.length;
+                buildingsNeedingWorkers.push({ building, shortfall });
+            }
+        });
+        
+        // 按照需求人數排序，優先處理需要更多工人的建築
+        buildingsNeedingWorkers.sort((a, b) => b.shortfall - a.shortfall);
+        
+        for (const { building, shortfall } of buildingsNeedingWorkers) {
+            let workersAssigned = 0;
+            
+            // 從其他工作中調派村民
+            for (const villager of this.villagers.values()) {
+                if (workersAssigned >= shortfall) break;
+                
+                // 如果村民在農田或砍樹工作，優先調派到建造
+                if ((villager.state === 'farming' || villager.state === 'harvestingFarm' || 
+                     villager.state === 'chopping' || villager.state === 'movingToTree' ||
+                     villager.state === 'idle') && 
+                    !villager.constructionBuilding && !villager.firstCastleMode) {
+                    
+                    // 清理當前工作
+                    if (villager.workingFarm) {
+                        villager.workingFarm.removeWorker?.(villager);
+                        villager.workingFarm = null;
+                    }
+                    
+                    villager.choppingTree = null;
+                    villager.choppingProgress = 0;
+                    villager.path = [];
+                    villager.target = null;
+                    
+                    // 分配到建造工作
+                    if (building.addWorker(villager)) {
+                        villager.constructionBuilding = building;
+                        villager.state = 'constructing';
+                        workersAssigned++;
+                    }
+                }
+            }
+        }
+    }
+
+    // 驗證農田分配的正確性
+    validateFarmAssignments() {
+        for (const villager of this.villagers.values()) {
+            if (villager.workingFarm) {
+                // 檢查農田是否還存在且完整
+                if (villager.workingFarm.needsDestruction?.() || !villager.workingFarm.isComplete) {
+                    villager.workingFarm.removeWorker?.(villager);
+                    villager.workingFarm = null;
+                }
+                // 檢查農田是否認識這個村民
+                else if (villager.workingFarm.workingVillager !== villager) {
+                    villager.workingFarm.setWorker?.(villager);
+                }
+            }
+        }
+    }
+
+    // 檢查第一棟城堡的建造狀態
+    updateFirstCastleStatus() {
+        const castles = this.buildingManager.castles;
+        
+        // 如果還沒有找到第一棟城堡，嘗試找到它
+        if (!this.firstCastle && castles.length > 0) {
+            this.firstCastle = castles[0]; // 假設第一個城堡就是第一棟城堡
+            // 一旦找到第一棟城堡，立即啟動特殊建造模式
+            if (!this.firstCastleBeingBuilt) {
+                this.firstCastleBeingBuilt = true;
+                this.startFirstCastleConstruction();
+            }
+        }
+        
+        if (this.firstCastle) {
+            // 如果城堡完成建造，結束特殊模式
+            if (this.firstCastle.isComplete && this.firstCastleBeingBuilt) {
+                this.firstCastleBeingBuilt = false;
+                this.finishFirstCastleConstruction();
+            }
+        }
+    }
+
+    // 開始第一棟城堡建造 - 讓所有村民圍繞城堡隨機走動
+    startFirstCastleConstruction() {
+        if (!this.firstCastle) return;
+        
+        // 獲取城堡中心位置
+        const castleCenter = {
+            x: this.firstCastle.x + Math.floor(this.firstCastle.width / 2),
+            y: this.firstCastle.y + Math.floor(this.firstCastle.height / 2)
+        };
+        
+        // 讓所有村民圍繞城堡隨機走動
+        for (const villager of this.villagers.values()) {
+            // 清理村民當前的工作狀態
+            this.clearVillagerWorkState(villager);
+            
+            // 設置為城堡建造模式
+            villager.firstCastleMode = true;
+            villager.castleCenter = castleCenter;
+            villager.state = 'idle'; // 設為idle讓他們重新尋找工作
+        }
+    }
+
+    // 完成第一棟城堡建造 - 重置所有村民
+    finishFirstCastleConstruction() {
+        // 重置所有村民狀態
+        this.resetAllVillagers();
+        
+        // 重新分配村民到正常工作
+        setTimeout(() => {
+            this.reassignVillagersToFarms();
+        }, 200); // 延遲一點時間確保重置完成
+    }
+
+    // 清理村民的工作狀態
+    clearVillagerWorkState(villager) {
+        // 清理農田工作
+        if (villager.workingFarm) {
+            villager.workingFarm.removeWorker?.(villager);
+            villager.workingFarm = null;
+        }
+        
+        // 清理建造工作（除了第一棟城堡）
+        if (villager.constructionBuilding && villager.constructionBuilding !== this.firstCastle) {
+            villager.constructionBuilding.removeWorker?.(villager);
+            villager.constructionBuilding = null;
+        }
+        
+        // 清理移動和目標（但保留正在建造第一棟城堡的村民的目標）
+        if (villager.constructionBuilding !== this.firstCastle) {
+            villager.path = [];
+            villager.target = null;
+        }
+        
+        villager.choppingTree = null;
+        villager.choppingProgress = 0;
+        villager.harvestProgress = 0;
+    }
+
+    // 完全重置所有村民（用於第一棟城堡完成後）
+    resetAllVillagers() {
+        for (const villager of this.villagers.values()) {
+            // 清理第一棟城堡模式
+            villager.firstCastleMode = false;
+            villager.castleCenter = null;
+            
+            // 清理所有工作狀態
+            this.clearVillagerWorkState(villager);
+            
+            // 清理建造相關狀態
+            villager.workPosition = null;
+            villager.assignedToPart = null;
+            villager.targetBuildPosition = null;
+            
+            // 設置為閒置狀態
+            villager.state = 'idle';
+            
+            // 確保村民在地面上並且可見
+            if (villager.mesh) {
+                villager.mesh.position.y = 0;
+            }
+            villager.setVisibility(true);
+        }
+    }
+
+    // 消耗木材
+    consumeWood(amount) {
+        if (this.woodInventory >= amount) {
+            this.woodInventory -= amount;
+            return true;
+        }
+        return false;
+    }
+
+    // 獲取木材庫存
+    getWoodInventory() {
+        return this.woodInventory;
+    }
+
+    // 獲取村民數量
+    getVillagerCount() {
+        return this.villagers.size;
+    }
+
+    // 銷毀村民
+    destroyVillager(villagerId) {
+        const villager = this.villagers.get(villagerId);
+        if (villager) {
+            villager.destroy();
+            this.villagers.delete(villagerId);
+        }
+    }
+
+    // 獲取所有村民
+    getAllVillagers() {
+        return Array.from(this.villagers.values());
+    }
+
+    // 重新分配閒置村民到農田（當有新農田建造時調用）
+    reassignVillagersToFarms() {
+        // 找到所有沒有攜帶木材且不在農田工作的村民
+        const availableVillagers = Array.from(this.villagers.values()).filter(villager => 
+            villager.wood === 0 && 
+            villager.food === 0 &&
+            villager.state !== 'movingToFarm' &&
+            villager.state !== 'farming' && 
+            villager.state !== 'harvestingFarm' &&
+            villager.state !== 'movingToCastle' &&
+            !villager.workingFarm
+        );
+        
+        // 找到需要工人的已完成農田
+        const availableFarms = this.buildingManager.farms.filter(farm => 
+            farm.isComplete && !farm.hasWorker()
+        );
+        
+        // 分配村民到農田
+        const maxAssignments = Math.min(availableVillagers.length, availableFarms.length);
+        for (let i = 0; i < maxAssignments; i++) {
+            const villager = availableVillagers[i];
+            const farm = availableFarms[i];
+            
+            // 如果村民正在砍樹，打斷砍樹去農田
+            if (villager.state === 'chopping' || villager.state === 'movingToTree') {
+                villager.choppingTree = null;
+                villager.choppingProgress = 0;
+                villager.path = []; // 清空移動路徑
+            }
+            
+            // 分配到農田
+            const worldPos = farm.getWorldPosition();
+            villager.target = { x: worldPos.x, z: worldPos.z };
+            villager.state = 'movingToFarm';
+            villager.workingFarm = farm;
+            farm.setWorker(villager);
+            
+            // 移動到農田
+            const gridPos = villager.grid.worldToGrid(worldPos.x, worldPos.z);
+            villager.createPath(gridPos.x, gridPos.y);
+        }
+    }
+
+    // 獲取農田工人數量
+    getFarmWorkerCount() {
+        let farmWorkers = 0;
+        for (const villager of this.villagers.values()) {
+            if (villager.workingFarm || 
+                villager.state === 'movingToFarm' || 
+                villager.state === 'farming' || 
+                villager.state === 'harvestingFarm') {
+                farmWorkers++;
+            }
+        }
+        return farmWorkers;
+    }
+}

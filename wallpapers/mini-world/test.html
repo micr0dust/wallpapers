@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Debug Test</title>
+</head>
+<body>
+    <div id="log"></div>
+    
+    <script>
+        const log = document.getElementById('log');
+        
+        function addLog(message) {
+            const div = document.createElement('div');
+            div.textContent = new Date().toLocaleTimeString() + ': ' + message;
+            log.appendChild(div);
+            console.log(message);
+        }
+        
+        // 測試腳本載入
+        addLog('開始載入腳本...');
+        
+        window.addEventListener('error', function(e) {
+            addLog('錯誤: ' + e.message + ' 在 ' + e.filename + ':' + e.lineno);
+        });
+        
+        // 依序載入腳本
+        const scripts = [
+            'world.js',
+            'buildings.js', 
+            'villager.js'
+        ];
+        
+        let loadedScripts = 0;
+        
+        function loadNextScript() {
+            if (loadedScripts >= scripts.length) {
+                addLog('所有腳本載入完成');
+                return;
+            }
+            
+            const script = document.createElement('script');
+            script.src = scripts[loadedScripts];
+            script.onload = function() {
+                addLog('載入成功: ' + scripts[loadedScripts]);
+                loadedScripts++;
+                loadNextScript();
+            };
+            script.onerror = function() {
+                addLog('載入失敗: ' + scripts[loadedScripts]);
+            };
+            document.head.appendChild(script);
+        }
+        
+        loadNextScript();
+    </script>
+</body>
+</html>
