@@ -1427,6 +1427,8 @@ class VillagerManager {
             return;
         }
         
+        console.log('=== 檢查建造工人分配 ===');
+        
         // 第一步：重新激活已經分配給未完成建築的村民
         let reactivatedWorkers = 0;
         for (const villager of this.villagers.values()) {
@@ -1441,6 +1443,7 @@ class VillagerManager {
                 
                 villager.state = 'constructing';
                 reactivatedWorkers++;
+                console.log(`重新激活村民 ${villager.id.slice(-8)} 建造 ${villager.constructionBuilding.type}`);
             }
         }
         
@@ -1536,6 +1539,13 @@ class VillagerManager {
                 }
             }
         }
+        
+        if (reactivatedWorkers > 0) {
+            console.log(`重新激活了 ${reactivatedWorkers} 個建造工人`);
+        }
+        
+        console.log(`總共為建築分配了 ${totalAssignedWorkers} 個新工人`);
+        console.log('=== 建造工人分配檢查完成 ===');
     }
     
     // 獲取建築優先級
@@ -1584,16 +1594,26 @@ class VillagerManager {
         });
         
         if (unfinishedBuildings.length > 0) {
+            console.log(`=== 優先處理 ${unfinishedBuildings.length} 個未完成建築 ===`);
+            
             // 按進度降序排序，優先完成進度最高的建築
             unfinishedBuildings.sort((a, b) => b.progressPercent - a.progressPercent);
             
-            // 為進度最高的建築分配足夠的工人
-            const topBuilding = unfinishedBuildings[0];
-            if (topBuilding.currentWorkers < topBuilding.maxWorkers) {
-                const needed = topBuilding.maxWorkers - topBuilding.currentWorkers;
+            // 為所有未完成的建築分配工人，從進度最高開始
+            unfinishedBuildings.forEach((buildingInfo, index) => {
+                const { building, currentWorkers, maxWorkers, progressPercent } = buildingInfo;
                 
-                this.assignWorkersToBuilding(topBuilding.building, needed, true); // true = 高優先級
-            }
+                if (currentWorkers < maxWorkers) {
+                    const needed = maxWorkers - currentWorkers;
+                    console.log(`建築 ${building.type} 進度 ${progressPercent.toFixed(1)}%, 需要 ${needed} 個工人`);
+                    
+                    // 對於已開工建築使用高優先級，新建築使用一般優先級
+                    const highPriority = progressPercent > 0;
+                    const assigned = this.assignWorkersToBuilding(building, needed, highPriority);
+                    
+                    console.log(`為建築 ${building.type} 分配了 ${assigned}/${needed} 個工人`);
+                }
+            });
         }
     }
     
