@@ -68,7 +68,7 @@ class Villager {
         this.scene.add(this.mesh);
     }
 
-    update(currentTime, treeManager, isNight = false) {
+    update(currentTime, treeManager, isNight = false, gameSpeed = 1.0) {
         // 更新夜晚狀態
         this.updateNightState(isNight);
         
@@ -85,8 +85,9 @@ class Villager {
             this.updateFirstCastleMovement(currentTime);
         }
         
-        // 移動邏輯
-        if (currentTime - this.lastMoveTime >= this.moveInterval) {
+        // 移動邏輯 - 根據遊戲速度調整移動間隔
+        const adjustedMoveInterval = this.moveInterval / gameSpeed;
+        if (currentTime - this.lastMoveTime >= adjustedMoveInterval) {
             this.move();
             this.lastMoveTime = currentTime;
         }
@@ -1240,7 +1241,7 @@ class VillagerManager {
     }
 
     // 更新所有村民
-    update(currentTime, treeManager, isNight = false) {
+    update(currentTime, treeManager, isNight = false, gameSpeed = 1.0) {
         // 檢查第一棟城堡的建造狀態
         this.updateFirstCastleStatus();
         
@@ -1270,7 +1271,7 @@ class VillagerManager {
         this.wasNight = isNight;
         
         for (const villager of this.villagers.values()) {
-            villager.update(currentTime, treeManager, isNight);
+            villager.update(currentTime, treeManager, isNight, gameSpeed);
         }
         
         // 移除自動收集邏輯，改由個別村民在到達城堡時直接上繳

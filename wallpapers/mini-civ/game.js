@@ -185,4 +185,32 @@ class Game {
             world: this.world ? this.world.getGameState() : null
         };
     }
+    
+    // 暫停遊戲（Wallpaper Engine 設定）
+    pause() {
+        if (this.world && !this.world.isPaused) {
+            const isPaused = this.world.togglePause();
+            if (this.ui.pauseBtn) {
+                const pauseSpan = this.ui.pauseBtn.querySelector('span:last-child');
+                if (pauseSpan) {
+                    pauseSpan.textContent = isPaused ? '繼續' : '暫停';
+                }
+            }
+            console.log('遊戲已暫停');
+        }
+    }
+    
+    // 恢復遊戲（Wallpaper Engine 設定）
+    resume() {
+        if (this.world && this.world.isPaused) {
+            const isPaused = this.world.togglePause();
+            if (this.ui.pauseBtn) {
+                const pauseSpan = this.ui.pauseBtn.querySelector('span:last-child');
+                if (pauseSpan) {
+                    pauseSpan.textContent = isPaused ? '繼續' : '暫停';
+                }
+            }
+            console.log('遊戲已恢復');
+        }
+    }
 }

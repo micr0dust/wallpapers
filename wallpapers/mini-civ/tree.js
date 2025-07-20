@@ -411,4 +411,65 @@ class TreeManager {
         
         return false;
     }
+    
+    // 設定目標樹木數量（Wallpaper Engine 設定）
+    setTargetTreeCount(targetCount) {
+        const currentTreeCount = this.getActiveTreeCount() + this.getDestroyedTreeCount();
+        
+        if (targetCount > currentTreeCount) {
+            // 需要增加樹木
+            const treesToAdd = targetCount - currentTreeCount;
+            this.addRandomTrees(treesToAdd);
+            console.log(`增加了 ${treesToAdd} 棵樹木，目前總數: ${this.getActiveTreeCount() + this.getDestroyedTreeCount()}`);
+        } else if (targetCount < currentTreeCount) {
+            // 需要移除樹木
+            const treesToRemove = currentTreeCount - targetCount;
+            this.removeRandomTrees(treesToRemove);
+            console.log(`移除了 ${treesToRemove} 棵樹木，目前總數: ${this.getActiveTreeCount() + this.getDestroyedTreeCount()}`);
+        }
+    }
+    
+    // 隨機添加樹木
+    addRandomTrees(count) {
+        let added = 0;
+        const maxAttempts = count * 10; // 避免無限循環
+        
+        for (let attempt = 0; attempt < maxAttempts && added < count; attempt++) {
+            const x = Math.floor(Math.random() * this.grid.size);
+            const y = Math.floor(Math.random() * this.grid.size);
+            
+            // 避開中心區域
+            const centerX = this.grid.size / 2;
+            const centerY = this.grid.size / 2;
+            const distanceFromCenter = Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2);
+            
+            if (distanceFromCenter > 30 && this.addTreeAt(x, y)) {
+                added++;
+            }
+        }
+        
+        return added;
+    }
+    
+    // 隨機移除樹木
+    removeRandomTrees(count) {
+        const allTrees = [...this.trees.values(), ...this.destroyedTrees.values()];
+        const treesToRemove = allTrees.slice(0, Math.min(count, allTrees.length));
+        
+        let removed = 0;
+        for (const tree of treesToRemove) {
+            if (this.trees.has(tree.id)) {
+                this.trees.delete(tree.id);
+                tree.destroy();
+                this.grid.removeTree(tree.x, tree.y);
+                removed++;
+            } else if (this.destroyedTrees.has(tree.id)) {
+                this.destroyedTrees.delete(tree.id);
+                tree.destroy();
+                removed++;
+            }
+        }
+        
+        return removed;
+    }
 }

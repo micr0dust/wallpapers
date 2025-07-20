@@ -5,23 +5,51 @@ class CameraController {
         this.scene = scene;
         this.renderer = renderer;
         
-        // 相機參數
-        this.radius = 35;  // 旋轉半徑（稍微增加以更好觀察地形）
-        this.height = 25;   // 相機高度（適當提高以看到地形起伏）
+        // 從配置管理器讀取默認值，如果失敗則使用安全的默認值
+        let defaults = {};
+        try {
+            if (window.configManager) {
+                defaults = window.configManager.getDefaults();
+            }
+        } catch (error) {
+            console.warn('⚠️ 無法獲取配置，使用內建默認值:', error.message);
+            // Wallpaper Engine 安全默認值（與 project.json 一致）
+            defaults = {
+                cameraRadius: 150,
+                cameraHeight: 80,
+                rotationSpeed: 0.002,
+                fogEnabled: true
+            };
+        }
+        
+        // 相機參數 - 從配置或使用默認值
+        this.radius = defaults.cameraRadius || 150;  // 旋轉半徑
+        this.height = defaults.cameraHeight || 80;   // 相機高度
         this.angle = 0;     // 旋轉角度
-        this.rotationSpeed = 0.002; // 旋轉速度（保持緩慢）
+        this.rotationSpeed = defaults.rotationSpeed || 0.002; // 旋轉速度
         
         // 市中心位置
         this.centerX = 0;
         this.centerZ = 0;
         
-        this.setupFog();
+        this.setupFog(defaults.fogEnabled !== false);
         this.setupCamera();
+        
+        console.log('相機控制器初始化，使用配置:', {
+            radius: this.radius,
+            height: this.height,
+            rotationSpeed: this.rotationSpeed,
+            fogEnabled: defaults.fogEnabled !== false
+        });
     }
 
-    setupFog() {
+    setupFog(enabled) {
         // 設置霧效果，使用指數霧創造更濃密的效果（適應200x200地圖）
-        this.scene.fog = new THREE.FogExp2(0x87CEEB, 0.015); // 使用指數霧，密度0.015平衡可見度和遮蔽效果
+        if (enabled) {
+            this.scene.fog = new THREE.FogExp2(0x87CEEB, 0.015); // 使用指數霧，密度0.015平衡可見度和遮蔽效果
+        } else {
+            this.scene.fog = null;
+        }
         this.renderer.setClearColor(0x87CEEB); // 設置背景色為天藍色
     }
 

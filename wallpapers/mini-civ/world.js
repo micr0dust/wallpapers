@@ -15,7 +15,19 @@ class World {
         
         // 遊戲狀態
         this.isPaused = false;
-        this.gameSpeed = 0.25;
+        
+        // 從配置管理器讀取默認遊戲速度，如果失敗則使用安全默認值
+        let gameSpeed = 1.0; // 安全默認值
+        try {
+            if (window.configManager) {
+                const defaults = window.configManager.getDefaults();
+                gameSpeed = defaults.gameSpeed || 1.0;
+            }
+        } catch (error) {
+            console.warn('⚠️ 無法獲取遊戲速度配置，使用默認值:', error.message);
+        }
+        
+        this.gameSpeed = gameSpeed;
         this.lastUpdateTime = 0;
         
         // AI建造策略
@@ -39,6 +51,10 @@ class World {
 
     // 初始化世界
     init(canvas) {
+        console.log('World 初始化，使用配置:', {
+            gameSpeed: this.gameSpeed
+        });
+        
         this.setupRenderer(canvas);
         this.setupScene();
         this.setupCamera();
@@ -690,16 +706,19 @@ class World {
         // 更新相機
         this.cameraController.update();
         
+        // 計算調整後的時間（考慮遊戲速度）
+        const adjustedCurrentTime = currentTime * this.gameSpeed;
+        
         // 更新遊戲系統
-        this.buildingManager.update(currentTime, isNight);
-        this.villagerManager.update(currentTime, this.treeManager, isNight);
+        this.buildingManager.update(adjustedCurrentTime, isNight);
+        this.villagerManager.update(adjustedCurrentTime, this.treeManager, isNight, this.gameSpeed);
         this.treeManager.update();
         
         // AI建造策略
-        this.updateAIBuilder(currentTime);
+        this.updateAIBuilder(adjustedCurrentTime);
         
         // 檢查村民生產
-        this.handleVillagerSpawning(currentTime);
+        this.handleVillagerSpawning(adjustedCurrentTime);
         
         this.lastUpdateTime = currentTime;
     }

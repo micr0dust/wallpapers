@@ -132,6 +132,9 @@
     <!-- Three.js -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     
+    <!-- 配置管理器 -->
+    <script src="config.js"></script>
+    
     <!-- 遊戲核心類別 -->
     <script src="world.js"></script>
     <script src="grid.js"></script>
@@ -143,12 +146,174 @@
     
     <!-- 主要遊戲啟動 -->
     <script>
-        const game = new Game();
-        game.init();
+        // 異步初始化遊戲
+        async function initGame() {
+            try {
+                // 環境檢測
+                const isWallpaperEngine = typeof window.wallpaperPropertyListener !== 'undefined' ||
+                                        window.location.protocol === 'wallpaper-engine:' ||
+                                        (window.location.protocol === 'file:' && !window.location.href.includes('localhost'));
+                const isBrowser = !isWallpaperEngine;
+                
+                console.log(`🚀 啟動模式: ${isWallpaperEngine ? 'Wallpaper Engine' : '網頁瀏覽器'}`);
+                console.log(`📍 URL: ${window.location.href}`);
+                console.log(`🔧 協議: ${window.location.protocol}`);
+                
+                // 初始化配置管理器（使用內建默認值）
+                if (!window.configManager.defaultValues) {
+                    window.configManager.defaultValues = {
+                        gameSpeed: 1.0,
+                        cameraHeight: 25,
+                        cameraRadius: 35,
+                        rotationSpeed: 0.002,
+                        fogEnabled: true,
+                        autoPlay: true
+                    };
+                    console.log('🔧 使用內建默認配置:', window.configManager.defaultValues);
+                }
+                
+                // 在網頁環境中嘗試載入 project.json
+                if (isBrowser) {
+                    try {
+                        console.log('� 網頁模式：嘗試從 project.json 讀取配置...');
+                        await window.configManager.loadConfig();
+                    } catch (error) {
+                        console.warn('⚠️ 網頁模式：project.json 載入失敗，使用內建默認值:', error.message);
+                    }
+                } else {
+                    console.log('🎯 Wallpaper Engine 模式：使用內建默認值');
+                }
+                
+                // 初始化遊戲
+                console.log('🎮 開始初始化遊戲...');
+                const game = new Game();
+                game.init();
+                
+                // 將 game 設為全域變數
+                window.game = game;
+                
+                console.log('✅ 遊戲初始化完成！');
+                
+                // 顯示當前配置
+                const config = window.configManager.getDefaults();
+                console.table(config);
+                
+            } catch (error) {
+                console.error('❌ 遊戲初始化失敗:', error);
+                
+                // 顯示詳細錯誤信息
+                console.error('錯誤堆疊:', error.stack);
+                
+                // 僅在非 Wallpaper Engine 環境顯示錯誤頁面
+                if (window.location.protocol !== 'file:' || window.location.href.includes('localhost')) {
+                    document.body.innerHTML = `
+                        <div style="color: white; text-align: center; padding: 50px; font-family: Arial; background: #1a1a1a; min-height: 100vh;">
+                            <h2>🚫 遊戲初始化失敗</h2>
+                            <p style="color: #ff6b6b; font-weight: bold;">錯誤: ${error.message}</p>
+                            <p>請檢查瀏覽器控制台獲取更多信息</p>
+                        </div>
+                    `;
+                }
+            }
+        }
+        
+        // 啟動遊戲
+        initGame();
+        
+        // Wallpaper Engine 屬性監聽器（在網頁模式下也會被調用以應用默認值）
+        window.wallpaperPropertyListener = {
+            applyUserProperties: function(properties) {
+                const isWallpaperEngine = typeof window.wallpaperPropertyListener !== 'undefined' && 
+                                        Object.keys(properties).some(key => properties[key].value !== undefined);
+                
+                if (isWallpaperEngine) {
+                    console.log('📡 接收到 Wallpaper Engine 屬性變更:', properties);
+                } else {
+                    console.log('🌐 網頁模式：應用來自 project.json 的默認屬性:', properties);
+                }
+                
+                const game = window.game;
+                if (!game) {
+                    console.warn('⚠️ 遊戲尚未初始化，稍後重試');
+                    return;
+                }
+                
+                // 遊戲速度
+                if (properties.gameSpeed) {
+                    const speed = properties.gameSpeed.value;
+                    if (game.world) {
+                        game.world.setGameSpeed(speed);
+                        console.log(`🏃 遊戲速度設為: ${speed}x（影響村民移動、建造等）`);
+                    }
+                }
+                
+                // 相機高度
+                if (properties.cameraHeight && game.world && game.world.cameraController) {
+                    const height = properties.cameraHeight.value;
+                    game.world.cameraController.height = height;
+                    console.log(`📸 相機高度設為: ${height}`);
+                }
+                
+                // 相機距離
+                if (properties.cameraRadius && game.world && game.world.cameraController) {
+                    const radius = properties.cameraRadius.value;
+                    game.world.cameraController.radius = radius;
+                    console.log(`🎯 相機距離設為: ${radius}`);
+                }
+                
+                // 旋轉速度
+                if (properties.rotationSpeed && game.world && game.world.cameraController) {
+                    const speed = properties.rotationSpeed.value;
+                    game.world.cameraController.rotationSpeed = speed;
+                    console.log(`🔄 旋轉速度設為: ${speed}`);
+                }
+                
+                // 霧效果
+                if (properties.fogEnabled !== undefined && game.world && game.world.cameraController) {
+                    const enabled = properties.fogEnabled.value;
+                    if (enabled) {
+                        game.world.cameraController.scene.fog = new THREE.FogExp2(0x87CEEB, 0.015);
+                    } else {
+                        game.world.cameraController.scene.fog = null;
+                    }
+                    console.log(`🌫️ 霧效果: ${enabled ? '啟用' : '停用'}`);
+                }
+                
+                // 自動遊戲（暫停/恢復）
+                if (properties.autoPlay !== undefined) {
+                    const autoPlay = properties.autoPlay.value;
+                    if (autoPlay) {
+                        game.resume();
+                    } else {
+                        game.pause();
+                    }
+                    console.log(`⏯️ 自動遊戲: ${autoPlay ? '啟用' : '停用'}`);
+                }
+            }
+        };
+        
+        // 應用默認屬性值（確保設定生效）
+        setTimeout(function() {
+            try {
+                const defaults = window.configManager.getDefaults();
+                window.wallpaperPropertyListener.applyUserProperties({
+                    gameSpeed: { value: defaults.gameSpeed },
+                    cameraHeight: { value: defaults.cameraHeight },
+                    cameraRadius: { value: defaults.cameraRadius },
+                    rotationSpeed: { value: defaults.rotationSpeed },
+                    fogEnabled: { value: defaults.fogEnabled },
+                    autoPlay: { value: defaults.autoPlay }
+                });
+                console.log('✅ 已應用來自 project.json 的默認配置:', defaults);
+            } catch (error) {
+                console.error('❌ 無法應用默認配置:', error);
+            }
+        }, 1500); // 延長等待時間確保配置已載入
         
         // 全局調試函數
         window.debugVillagers = function() {
-            if (game.world) {
+            const game = window.game;
+            if (game && game.world) {
                 game.world.debugVillagers();
             } else {
                 console.log('遊戲世界尚未初始化');
@@ -157,7 +322,8 @@
         
         // 強制修復停滯建築的函數
         window.fixBuildings = function() {
-            if (game.world) {
+            const game = window.game;
+            if (game && game.world) {
                 const fixed = game.world.forceFixBuildings();
                 console.log(`修復操作完成，處理了 ${fixed} 個問題`);
                 return fixed;
@@ -169,7 +335,8 @@
 
         // 創建村民位置標記（發光線段）
         window.debugMarkers = function() {
-            if (game.world) {
+            const game = window.game;
+            if (game && game.world) {
                 const count = game.world.debugCreateMarkers();
                 console.log(`創建了 ${count} 個村民位置標記`);
                 return count;
@@ -181,7 +348,8 @@
 
         // 移除村民位置標記
         window.removeMarkers = function() {
-            if (game.world) {
+            const game = window.game;
+            if (game && game.world) {
                 game.world.debugRemoveMarkers();
                 console.log('已移除所有村民標記');
             } else {
@@ -191,7 +359,8 @@
 
         // 修復村民材質問題
         window.fixMaterials = function() {
-            if (game.world) {
+            const game = window.game;
+            if (game && game.world) {
                 const fixed = game.world.debugFixMaterials();
                 console.log(`修復了 ${fixed} 個村民的材質問題`);
                 return fixed;
@@ -203,7 +372,8 @@
 
         // 重新創建問題村民
         window.recreateVillagers = function() {
-            if (game.world) {
+            const game = window.game;
+            if (game && game.world) {
                 const recreated = game.world.debugRecreateVillagers();
                 console.log(`重新創建了 ${recreated} 個村民`);
                 return recreated;
@@ -215,7 +385,8 @@
 
         // 清理超界建築和修復被困村民
         window.cleanupOutOfBounds = function() {
-            if (game.world) {
+            const game = window.game;
+            if (game && game.world) {
                 const result = game.world.debugCleanupOutOfBounds();
                 console.log(`清理完成 - 移除建築: ${result.removedBuildings}, 拯救工人: ${result.rescuedWorkers}`);
                 return result;
@@ -227,7 +398,8 @@
 
         // 修復卡住的砍樹村民
         window.fixStuckVillagers = function() {
-            if (game.world) {
+            const game = window.game;
+            if (game && game.world) {
                 const result = game.world.debugFixStuckTreeVillagers();
                 console.log(`已修復 ${result} 位卡住的砍樹村民`);
                 return result;
@@ -239,7 +411,8 @@
         
         // 測試砍樹狀態
         window.testTreeState = function() {
-            if (game.world && game.world.villagerManager) {
+            const game = window.game;
+            if (game && game.world && game.world.villagerManager) {
                 return game.world.villagerManager.debugTreeState();
             } else {
                 console.log('遊戲未初始化');
@@ -249,7 +422,8 @@
 
         // 執行全面修復
         window.fixAll = function() {
-            if (game.world) {
+            const game = window.game;
+            if (game && game.world) {
                 return game.world.debugFixAll();
             } else {
                 console.log('遊戲世界尚未初始化');
