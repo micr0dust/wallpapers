@@ -23,10 +23,10 @@ class CameraController {
         }
         
         // 相機參數 - 從配置或使用默認值
-        this.radius = defaults.cameraRadius || 150;  // 旋轉半徑
-        this.height = defaults.cameraHeight || 80;   // 相機高度
+        this.radius = defaults.cameraRadius;  // 旋轉半徑
+        this.height = defaults.cameraHeight;   // 相機高度
         this.angle = 0;     // 旋轉角度
-        this.rotationSpeed = defaults.rotationSpeed || 0.002; // 旋轉速度
+        this.rotationSpeed = defaults.rotationSpeed; // 旋轉速度
         
         // 市中心位置
         this.centerX = 0;
