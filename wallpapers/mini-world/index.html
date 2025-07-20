@@ -170,11 +170,109 @@
                 return 0;
             }
         };
+
+        // 創建村民位置標記（發光線段）
+        window.debugMarkers = function() {
+            if (game.world) {
+                const count = game.world.debugCreateMarkers();
+                console.log(`創建了 ${count} 個村民位置標記`);
+                return count;
+            } else {
+                console.log('遊戲世界尚未初始化');
+                return 0;
+            }
+        };
+
+        // 移除村民位置標記
+        window.removeMarkers = function() {
+            if (game.world) {
+                game.world.debugRemoveMarkers();
+                console.log('已移除所有村民標記');
+            } else {
+                console.log('遊戲世界尚未初始化');
+            }
+        };
+
+        // 修復村民材質問題
+        window.fixMaterials = function() {
+            if (game.world) {
+                const fixed = game.world.debugFixMaterials();
+                console.log(`修復了 ${fixed} 個村民的材質問題`);
+                return fixed;
+            } else {
+                console.log('遊戲世界尚未初始化');
+                return 0;
+            }
+        };
+
+        // 重新創建問題村民
+        window.recreateVillagers = function() {
+            if (game.world) {
+                const recreated = game.world.debugRecreateVillagers();
+                console.log(`重新創建了 ${recreated} 個村民`);
+                return recreated;
+            } else {
+                console.log('遊戲世界尚未初始化');
+                return 0;
+            }
+        };
+
+        // 清理超界建築和修復被困村民
+        window.cleanupOutOfBounds = function() {
+            if (game.world) {
+                const result = game.world.debugCleanupOutOfBounds();
+                console.log(`清理完成 - 移除建築: ${result.removedBuildings}, 拯救工人: ${result.rescuedWorkers}`);
+                return result;
+            } else {
+                console.log('遊戲世界尚未初始化');
+                return { removedBuildings: 0, rescuedWorkers: 0 };
+            }
+        };
+
+        // 修復卡住的砍樹村民
+        window.fixStuckVillagers = function() {
+            if (game.world) {
+                const result = game.world.debugFixStuckTreeVillagers();
+                console.log(`已修復 ${result} 位卡住的砍樹村民`);
+                return result;
+            } else {
+                console.log('遊戲世界尚未初始化');
+                return 0;
+            }
+        };
+        
+        // 測試砍樹狀態
+        window.testTreeState = function() {
+            if (game.world && game.world.villagerManager) {
+                return game.world.villagerManager.debugTreeState();
+            } else {
+                console.log('遊戲未初始化');
+                return null;
+            }
+        };
+
+        // 執行全面修復
+        window.fixAll = function() {
+            if (game.world) {
+                return game.world.debugFixAll();
+            } else {
+                console.log('遊戲世界尚未初始化');
+                return null;
+            }
+        };
         
         // 在控制台提示調試命令
         console.log('調試命令已載入:');
         console.log('- debugVillagers() : 檢查村民和建築狀態');
         console.log('- fixBuildings() : 強制修復停滯的建築');
+        console.log('- debugMarkers() : 創建村民位置標記（發光線段）');
+        console.log('- removeMarkers() : 移除村民位置標記');
+        console.log('- fixMaterials() : 修復村民材質問題');
+        console.log('- recreateVillagers() : 重新創建問題村民');
+        console.log('- cleanupOutOfBounds() : 清理超界建築並拯救被困村民');
+        console.log('- fixStuckVillagers() : 修復卡住的砍樹村民');
+        console.log('- testTreeState() : 查看砍樹村民詳細狀態');
+        console.log('- fixAll() : 執行全面修復（包含上述所有修復）');
     </script>
 </body>
 </html>

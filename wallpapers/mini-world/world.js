@@ -877,6 +877,109 @@ class World {
         }
     }
 
+    // 調試工具：創建村民位置標記
+    debugCreateMarkers() {
+        if (this.villagerManager) {
+            return this.villagerManager.debugCreateVillagerMarkers();
+        } else {
+            console.log('村民管理器尚未初始化');
+            return 0;
+        }
+    }
+
+    // 調試工具：移除村民標記
+    debugRemoveMarkers() {
+        if (this.villagerManager) {
+            return this.villagerManager.debugRemoveVillagerMarkers();
+        } else {
+            console.log('村民管理器尚未初始化');
+        }
+    }
+
+    // 修復村民材質問題
+    debugFixMaterials() {
+        if (this.villagerManager) {
+            return this.villagerManager.debugFixVillagerMaterials();
+        } else {
+            console.log('村民管理器尚未初始化');
+            return 0;
+        }
+    }
+
+    // 重新創建問題村民
+    debugRecreateVillagers() {
+        if (this.villagerManager) {
+            return this.villagerManager.debugRecreateVillagers();
+        } else {
+            console.log('村民管理器尚未初始化');
+            return 0;
+        }
+    }
+
+    // 調試工具：清理超界建築和修復被困村民
+    debugCleanupOutOfBounds() {
+        if (this.villagerManager) {
+            return this.villagerManager.debugCleanupOutOfBoundsBuildings();
+        } else {
+            console.log('村民管理器尚未初始化');
+            return { removedBuildings: 0, rescuedWorkers: 0 };
+        }
+    }
+
+    // 調試工具：強制修復所有問題
+    debugFixAll() {
+        console.log('=== 執行全面修復 ===');
+        
+        if (!this.villagerManager) {
+            console.log('村民管理器尚未初始化');
+            return;
+        }
+        
+        // 1. 清理超界建築
+        const cleanupResult = this.villagerManager.debugCleanupOutOfBoundsBuildings();
+        
+        // 2. 修復建築狀態
+        this.villagerManager.fixBrokenBuildings();
+        
+        // 3. 修復村民材質
+        const materialsFixed = this.villagerManager.debugFixVillagerMaterials();
+        
+        // 4. 重新創建問題村民
+        const villagersRecreated = this.villagerManager.debugRecreateVillagers();
+        
+        // 5. 強制修復停滯建築
+        const stuckBuildingsFixed = this.villagerManager.forceFixStuckBuildings();
+        
+        // 6. 修復卡住的砍樹村民
+        const stuckTreeVillagersFixed = this.villagerManager.debugFixStuckTreeVillagers();
+        
+        // 7. 重新檢查可見性
+        this.villagerManager.checkVillagerVisibility(false);
+        
+        console.log('=== 全面修復完成 ===');
+        console.log(`清理建築: ${cleanupResult.removedBuildings}, 拯救工人: ${cleanupResult.rescuedWorkers}`);
+        console.log(`修復材質: ${materialsFixed}, 重建村民: ${villagersRecreated}, 修復停滯建築工人: ${stuckBuildingsFixed}`);
+        console.log(`修復卡住砍樹村民: ${stuckTreeVillagersFixed}`);
+        
+        return {
+            cleanupResult,
+            materialsFixed,
+            villagersRecreated,
+            stuckBuildingsFixed,
+            stuckTreeVillagersFixed
+        };
+    }
+
+    // 調試工具：修復卡住的砍樹村民
+    debugFixStuckTreeVillagers() {
+        if (this.villagerManager) {
+            return this.villagerManager.debugFixStuckTreeVillagers();
+        } else {
+            console.log('村民管理器尚未初始化');
+            return 0;
+        }
+    }
+
     // 處理窗口大小變化
     handleResize() {
         this.camera.aspect = window.innerWidth / window.innerHeight;

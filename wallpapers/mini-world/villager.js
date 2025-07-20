@@ -76,7 +76,6 @@ class Villager {
         // 增強檢查：所有非躲避狀態的村民在白天都應該可見
         if (!isNight && this.state !== 'hiding' && this.state !== 'movingToShelter' && this.mesh) {
             if (!this.mesh.visible) {
-                console.warn(`村民 ${this.id} 在白天被意外隱藏，正在恢復可見性`);
                 this.setVisibility(true);
             }
         }
@@ -145,7 +144,25 @@ class Villager {
                 this.handleIdleState(treeManager);
                 break;
             case 'movingToTree':
-                // 移動邏輯在move()中處理
+                // 移動邏輯在move()中處理，但添加安全檢查確保狀態轉換
+                if (this.target && (!this.path || this.path.length === 0)) {
+                    // 檢查是否已經到達樹的附近
+                    const distance = Math.sqrt(
+                        Math.pow(this.x - this.target.x, 2) +
+                        Math.pow(this.z - this.target.z, 2)
+                    );
+                    
+                    if (distance < 2.0) { // 在樹的2格範圍內就開始砍樹
+                        // 使用保存的樹木位置創建砍樹目標
+                        this.choppingTree = {
+                            x: this.target.treeX || this.target.x,
+                            y: this.target.treeY || this.target.y
+                        };
+                        this.state = 'chopping';
+                        this.choppingProgress = 0;
+                        console.log(`村民 ${this.id.slice(-8)} 到達砍樹位置，開始砍樹 at (${this.choppingTree.x}, ${this.choppingTree.y})`);
+                    }
+                }
                 break;
             case 'chopping':
                 this.handleChoppingState(treeManager);
@@ -422,6 +439,9 @@ class Villager {
             return;
         }
         
+        // 調試日誌：打印村民狀態
+        console.log(`村民 ${this.id.slice(-8)} 進入閒置狀態檢查: 木材=${this.wood}, 食物=${this.food}, 建築分配=${this.constructionBuilding ? this.constructionBuilding.type : '無'}`);
+        
         // 最高優先級：檢查是否已分配到未完成的建築工作
         if (this.constructionBuilding && !this.constructionBuilding.isComplete) {
 
@@ -430,6 +450,7 @@ class Villager {
                 this.constructionBuilding.addWorker(this);
             }
             
+            console.log(`村民 ${this.id.slice(-8)} 繼續已分配的建築工作: ${this.constructionBuilding.type}`);
             this.state = 'constructing';
             return;
         }
@@ -438,6 +459,7 @@ class Villager {
         if (this.firstCastleMode && this.castleCenter) {
             // 在第一棟城堡模式下，優先嘗試建造工作
             if (this.tryFindConstructionWork()) {
+                console.log(`村民 ${this.id.slice(-8)} 找到第一城堡建造工作`);
                 return; // 找到建造工作，結束
             }
             // 如果沒有找到建造工作，就隨機走動
@@ -447,27 +469,8 @@ class Villager {
         
         // 第二優先級：檢查是否有未完成的建築需要建造（會強制打斷其他工作）
         if (this.tryFindConstructionWorkWithHighestPriority()) {
+            console.log(`村民 ${this.id.slice(-8)} 找到最高優先級建造工作`);
             return; // 成功找到建造工作，結束
-        }
-        
-        // 如果攜帶了資源，需要先上繳到城堡（只有完成的城堡才能接收資源）
-        if (this.wood > 0 || this.food > 0) {
-            const gridPos = this.grid.worldToGrid(this.x, this.z);
-            const nearestCastle = this.grid.findNearestCastle(gridPos.x, gridPos.y, this.buildingManager);
-            
-            if (nearestCastle) {
-                if (nearestCastle.distance <= 10) {
-                    // 已經在城堡附近，直接上繳資源
-                    this.deliverResources();
-                    return;
-                } else {
-                    // 需要移動到城堡
-                    this.target = nearestCastle;
-                    this.state = 'movingToCastle';
-                    this.createPath(nearestCastle.x, nearestCastle.y);
-                }
-            }
-            return;
         }
         
         // 檢查是否有完成的城堡（一次檢查，多次使用）
@@ -475,28 +478,85 @@ class Villager {
         const nearestCastleForWork = this.grid.findNearestCastle(gridPos.x, gridPos.y, this.buildingManager);
         const hasCompletedCastle = nearestCastleForWork !== null;
         
-        // 沒有攜帶資源，優先級順序：建造 > 種田 > 伐木(有城堡時)
+        // 正確的優先級順序：建造 > 種田 > 資源上繳 > 伐木
         
-        // 再次檢查是否有建築需要建造（正常優先級）
+        // 優先級1：檢查是否有建築需要建造（即使攜帶資源也優先建造）
         if (this.tryFindConstructionWork()) {
+            console.log(`村民 ${this.id.slice(-8)} 找到一般建造工作（攜帶資源: ${this.wood > 0 || this.food > 0}）`);
             return; // 成功找到建造工作，結束
         }
         
-        // 其次，嘗試找農田工作（優先度2）
+        // 優先級2：嘗試找農田工作（即使攜帶資源也優先種田）
         if (this.tryFindFarmWork()) {
+            console.log(`村民 ${this.id.slice(-8)} 找到農田工作（攜帶資源: ${this.wood > 0 || this.food > 0}）`);
             return; // 成功找到農田工作，結束
         }
         
-        // 最後，如果有完成的城堡且沒有農田可種，才去砍樹（優先度3）
+        // 優先級3：如果攜帶了資源且沒有建造/種田工作，才上繳到城堡
+        if (this.wood > 0 || this.food > 0) {
+            console.log(`村民 ${this.id.slice(-8)} 攜帶資源，準備上繳到城堡`);
+            const nearestCastle = this.grid.findNearestCastle(gridPos.x, gridPos.y, this.buildingManager);
+            
+            if (nearestCastle) {
+                if (nearestCastle.distance <= 10) {
+                    // 已經在城堡附近，直接上繳資源
+                    console.log(`村民 ${this.id.slice(-8)} 在城堡附近，直接上繳資源`);
+                    this.deliverResources();
+                    return;
+                } else {
+                    // 需要移動到城堡 - 修復座標格式
+                    console.log(`村民 ${this.id.slice(-8)} 前往城堡上繳資源`);
+                    const worldPos = this.grid.gridToWorld(nearestCastle.x, nearestCastle.y);
+                    this.target = { x: worldPos.x, z: worldPos.z };
+                    this.state = 'movingToCastle';
+                    this.createPath(nearestCastle.x, nearestCastle.y);
+                }
+            }
+            return;
+        }
+        
+        // 最後，如果有完成的城堡且沒有農田可種，才去砍樹（優先度4）
         if (hasCompletedCastle) {
+            // 檢查是否在資源上繳冷卻期內（防止立即重新砍樹）
+            const currentTime = Date.now();
+            const cooldownTime = this.lastResourceDeliveryTime ? (currentTime - this.lastResourceDeliveryTime) : 9999;
+            
+            console.log(`村民 ${this.id.slice(-8)} 檢查砍樹冷卻期: 時間差=${cooldownTime}ms, 冷卻期=${cooldownTime < 2000 ? '進行中' : '已結束'}`);
+            
+            if (this.lastResourceDeliveryTime && cooldownTime < 2000) {
+                console.log(`村民 ${this.id.slice(-8)} 在冷卻期內，隨機移動`);
+                // 冷卻期內，進行隨機移動
+                if (this.path.length === 0) {
+                    this.startRandomMovement();
+                }
+                return;
+            }
+            
             const nearestTree = this.grid.findNearestTree(gridPos.x, gridPos.y);
             
             if (nearestTree) {
-                this.target = nearestTree;
+                console.log(`村民 ${this.id.slice(-8)} 開始新的砍樹任務 at (${nearestTree.x}, ${nearestTree.y})`);
+                
+                // 計算樹旁邊的砍樹位置（避免重疊）
+                const choppingPosition = this.calculateChoppingPosition(nearestTree.x, nearestTree.y);
+                
+                // 將grid座標轉換為world座標，並確保target格式正確
+                const worldPos = this.grid.gridToWorld(choppingPosition.x, choppingPosition.y);
+                this.target = { 
+                    x: worldPos.x, 
+                    z: worldPos.z,
+                    treeX: nearestTree.x,  // 保存原始樹木位置用於砍樹
+                    treeY: nearestTree.y
+                };
                 this.state = 'movingToTree';
-                this.createPath(nearestTree.x, nearestTree.y);
+                
+                this.createPath(choppingPosition.x, choppingPosition.y);
                 return; // 成功找到砍樹工作，結束
+            } else {
+                console.log(`村民 ${this.id.slice(-8)} 找不到樹木`);
             }
+        } else {
+            console.log(`村民 ${this.id.slice(-8)} 沒有完成的城堡，無法砍樹`);
         }
         
         // 如果既沒有建造、砍樹、農田工作，且不是夜晚，讓村民進行隨機移動避免站著不動
@@ -528,20 +588,53 @@ class Villager {
 
     handleChoppingState(treeManager) {
         if (this.choppingTree) {
+            // 村民現在在樹的旁邊砍樹，不會重疊遮擋
             this.choppingProgress++;
+            console.log(`村民 ${this.id.slice(-8)} 砍樹進度: ${this.choppingProgress}/10`);
             
-            // 每10次採伐後樹木消失，村民獲得1木材
+            // 修改：每砍一下就獲得木材並立即上繳，而不是等10次
+            console.log(`村民 ${this.id.slice(-8)} 砍樹一次前: 木材=${this.wood}`);
+            this.wood = 1; // 每砍一下就獲得1木材
+            console.log(`村民 ${this.id.slice(-8)} 砍樹一次後: 木材=${this.wood}`);
+            
+            // 每10次採伐後樹木才會消失
             if (this.choppingProgress >= 10) {
-                this.wood = 1; // 獲得1木材
                 treeManager.chopTree(this.choppingTree.x, this.choppingTree.y);
-                
-                // 清理砍樹相關狀態
-                this.choppingTree = null;
-                this.choppingProgress = 0;
-                this.target = null; // 清除目標
-                this.path = []; // 清除路徑
-                this.state = 'idle'; // 變為閒置狀態
+                console.log(`村民 ${this.id.slice(-8)} 砍樹10次，樹木消失`);
             }
+            
+            console.log(`村民 ${this.id.slice(-8)} 獲得木材，立即前往城堡上繳`);
+            
+            // 清理砍樹相關狀態
+            this.choppingTree = null;
+            this.choppingProgress = 0;
+            this.target = null; // 清除目標
+            this.path = []; // 清除路徑
+            
+            console.log(`村民 ${this.id.slice(-8)} 清理砍樹狀態後: 木材=${this.wood}, 狀態將變為movingToCastle`);
+            
+            // 直接前往城堡，而不是變成閒置狀態
+            const gridPos = this.grid.worldToGrid(this.x, this.z);
+            const nearestCastle = this.grid.findNearestCastle(gridPos.x, gridPos.y, this.buildingManager);
+            
+            if (nearestCastle && nearestCastle.distance <= 50) {
+                const worldPos = this.grid.gridToWorld(nearestCastle.x, nearestCastle.y);
+                this.target = { x: worldPos.x, z: worldPos.z };
+                this.state = 'movingToCastle';
+                this.createPath(nearestCastle.x, nearestCastle.y);
+                console.log(`村民 ${this.id.slice(-8)} 開始前往城堡，攜帶木材: ${this.wood}`);
+            } else {
+                // 如果找不到城堡，才設為閒置
+                console.log(`村民 ${this.id.slice(-8)} 找不到城堡，設為閒置狀態，攜帶木材: ${this.wood}`);
+                this.state = 'idle';
+            }
+        } else {
+            // 如果沒有砍樹目標，強制重置為閒置狀態
+            console.warn(`村民 ${this.id.slice(-8)} 處於砍樹狀態但沒有砍樹目標，重置為閒置`);
+            this.state = 'idle';
+            this.choppingProgress = 0;
+            this.target = null;
+            this.path = [];
         }
     }
 
@@ -897,6 +990,8 @@ class Villager {
         const gridPos = this.grid.worldToGrid(this.x, this.z);
         const nearestCastle = this.grid.findNearestCastle(gridPos.x, gridPos.y, this.buildingManager);
         
+        console.log(`村民 ${this.id.slice(-8)} 嘗試上繳資源: 木材=${this.wood}, 食物=${this.food}, 最近城堡距離=${nearestCastle ? nearestCastle.distance : '無'}`);
+        
         if (nearestCastle && nearestCastle.distance <= 10) {
             // 找到對應的城堡建築對象 - 擴大搜尋範圍
             const castle = this.buildingManager.castles.find(c => {
@@ -909,29 +1004,42 @@ class Villager {
                 if (this.villagerManager) {
                     this.villagerManager.woodInventory += this.wood;
                 }
+                console.log(`村民 ${this.id.slice(-8)} 上繳 ${this.wood} 木材`);
                 this.wood = 0;
             }
             
             if (this.food > 0) {
+                console.log(`村民 ${this.id.slice(-8)} 上繳 ${this.food} 食物`);
                 this.food = 0; // 清空攜帶的食物
             }
             
-            // 如果村民有分配的農田，讓他們準備回到農田繼續工作
+            // 如果村民有分配的農田，讓他們立即回到農田繼續工作
             if (this.workingFarm && this.workingFarm.isComplete) {
-                // 重設狀態，讓村民回到農田
-                this.state = 'idle';
-                this.target = null;
+                console.log(`村民 ${this.id.slice(-8)} 上繳資源完成，返回農田工作`);
+                // 直接移動到農田，不要變成idle
+                const worldPos = this.workingFarm.getWorldPosition();
+                this.target = { x: worldPos.x, z: worldPos.z };
+                this.state = 'movingToFarm';
+                
+                const gridPos = this.grid.worldToGrid(worldPos.x, worldPos.z);
+                this.createPath(gridPos.x, gridPos.y);
             } else {
+                console.log(`村民 ${this.id.slice(-8)} 上繳資源完成，設定冷卻期並等待下次任務分配`);
+                // 設定一個短暫的冷卻期，避免立即重新砍樹
                 this.state = 'idle';
                 this.target = null;
+                this.lastResourceDeliveryTime = Date.now(); // 記錄上繳時間
+                console.log(`村民 ${this.id.slice(-8)} 冷卻期開始，時間戳: ${this.lastResourceDeliveryTime}`);
             }
         } else {
+            console.log(`村民 ${this.id.slice(-8)} 找不到城堡或距離太遠，重置為閒置狀態`);
             // 如果找不到城堡，強制重設為閒置狀態，避免卡住
             this.state = 'idle';
             this.target = null;
             
             // 清空資源，避免一直嘗試上繳
             if (this.wood > 0 || this.food > 0) {
+                console.log(`村民 ${this.id.slice(-8)} 清空資源: 木材=${this.wood}, 食物=${this.food}`);
                 this.wood = 0;
                 this.food = 0;
             }
@@ -965,15 +1073,54 @@ class Villager {
         }
     }
 
+    // 計算砍樹位置（在樹的旁邊而不是重疊）
+    calculateChoppingPosition(treeX, treeY) {
+        // 嘗試不同的相鄰位置，優先選擇可到達且不重疊的位置
+        const offsets = [
+            { x: 1, y: 0 },   // 右邊
+            { x: -1, y: 0 },  // 左邊
+            { x: 0, y: 1 },   // 上邊
+            { x: 0, y: -1 },  // 下邊
+            { x: 1, y: 1 },   // 右上
+            { x: -1, y: 1 },  // 左上
+            { x: 1, y: -1 },  // 右下
+            { x: -1, y: -1 }  // 左下
+        ];
+        
+        for (const offset of offsets) {
+            const posX = treeX + offset.x;
+            const posY = treeY + offset.y;
+            
+            // 檢查位置是否在地圖範圍內
+            if (posX >= 0 && posX < this.grid.size && 
+                posY >= 0 && posY < this.grid.size) {
+                
+                // 檢查位置是否可到達（不是建築物或其他障礙物）
+                // 這裡可以添加更多障礙物檢查
+                return { x: posX, y: posY };
+            }
+        }
+        
+        // 如果沒有找到合適的位置，回退到樹的位置（但這應該很少發生）
+        return { x: treeX, y: treeY };
+    }
+
     onReachTarget() {
         const gridPos = this.grid.worldToGrid(this.x, this.z);
         
         switch (this.state) {
             case 'movingToTree':
                 if (this.target) {
-                    this.choppingTree = this.target;
+                    // 使用保存的樹木位置創建砍樹目標
+                    this.choppingTree = {
+                        x: this.target.treeX || this.target.x,
+                        y: this.target.treeY || this.target.y
+                    };
                     this.state = 'chopping';
                     this.choppingProgress = 0;
+                    
+                    // 村民現在在樹旁邊，不需要額外移動
+                    // 砍樹時村民會待在當前位置（樹的旁邊）
                 }
                 break;
                 
@@ -1060,10 +1207,7 @@ class Villager {
     // 設置村民可見性
     setVisibility(visible) {
         if (this.mesh) {
-            // 記錄可見性變更（用於調試）
             this.mesh.visible = visible;
-        } else {
-            console.warn(`村民 ${this.id} 的 mesh 不存在，無法設置可見性`);
         }
     }
 
@@ -1244,8 +1388,6 @@ class VillagerManager {
 
     // 白天時重新分配村民工作
     reassignVillagersAfterDawn() {
-        console.log('白天來臨！重新分配村民工作，優先完成未完成的建築...');
-        
         // 等待片刻讓所有村民完成從躲避狀態的轉換
         setTimeout(() => {
             // 首先確保所有村民都是可見的（修正隱形村民問題）
@@ -1285,8 +1427,6 @@ class VillagerManager {
             return;
         }
         
-        console.log('白天開始，優先分配工人完成未完成的建築...');
-        
         // 第一步：重新激活已經分配給未完成建築的村民
         let reactivatedWorkers = 0;
         for (const villager of this.villagers.values()) {
@@ -1301,7 +1441,6 @@ class VillagerManager {
                 
                 villager.state = 'constructing';
                 reactivatedWorkers++;
-                console.log(`重新激活村民 ${villager.id} 繼續建造 ${villager.constructionBuilding.type}`);
             }
         }
         
@@ -1350,35 +1489,41 @@ class VillagerManager {
         for (const { building, shortfall, progressPercent } of buildingsNeedingWorkers) {
             let workersAssigned = 0;
             
-            console.log(`建築 ${building.type} 需要 ${shortfall} 個工人 (進度: ${progressPercent.toFixed(1)}%)`);
-            
             // 從其他工作中調派村民，對於已開工建築更加積極
             const isPartiallyBuilt = progressPercent > 0;
             for (const villager of this.villagers.values()) {
                 if (workersAssigned >= shortfall) break;
                 
-                // 對於已經開工的建築，更積極地調派村民（包括農田工人）
+                // 對於已經開工的建築，更積極地調派村民（但不打斷正在砍樹的村民）
                 const canReassign = isPartiallyBuilt ? 
                     (villager.state === 'farming' || villager.state === 'harvestingFarm' || 
-                     villager.state === 'chopping' || villager.state === 'movingToTree' ||
+                     villager.state === 'movingToTree' ||  // 可以打斷正在前往樹木的村民
                      villager.state === 'movingToFarm' || villager.state === 'idle') :
-                    (villager.state === 'chopping' || villager.state === 'movingToTree' ||
-                     villager.state === 'idle');
+                    (villager.state === 'movingToTree' || villager.state === 'idle');  // 一般情況下不打斷砍樹
                 
                 if (canReassign && !villager.constructionBuilding && !villager.firstCastleMode) {
-                    // 清理當前工作
+                    console.log(`重新分配村民 ${villager.id.slice(-8)} 到建造工作，當前狀態: ${villager.state}, 木材: ${villager.wood}`);
+                    
+                    // 清理當前工作（但保留資源）
                     if (villager.workingFarm) {
-                        if (isPartiallyBuilt) {
-                            console.log(`從農田調派村民 ${villager.id} 去完成建築 ${building.type}`);
-                        }
                         villager.workingFarm.removeWorker?.(villager);
                         villager.workingFarm = null;
                     }
+                    
+                    // 重要：保存村民的資源，清理砍樹狀態時不要清空wood和food
+                    const savedWood = villager.wood;
+                    const savedFood = villager.food;
                     
                     villager.choppingTree = null;
                     villager.choppingProgress = 0;
                     villager.path = [];
                     villager.target = null;
+                    
+                    // 恢復資源
+                    villager.wood = savedWood;
+                    villager.food = savedFood;
+                    
+                    console.log(`村民 ${villager.id.slice(-8)} 狀態清理完成，保留資源 - 木材: ${villager.wood}, 食物: ${villager.food}`);
                     
                     // 分配到建造工作
                     if (building.addWorker(villager)) {
@@ -1386,14 +1531,10 @@ class VillagerManager {
                         villager.state = 'constructing';
                         workersAssigned++;
                         totalAssignedWorkers++;
-                        console.log(`分配村民 ${villager.id} 到建築 ${building.type}`);
+                        console.log(`村民 ${villager.id.slice(-8)} 成功分配到建造工作: ${building.type}`);
                     }
                 }
             }
-        }
-        
-        if (totalAssignedWorkers > 0) {
-            console.log(`總共分配了 ${totalAssignedWorkers + reactivatedWorkers} 個工人到建築工作`);
         }
     }
     
@@ -1446,16 +1587,10 @@ class VillagerManager {
             // 按進度降序排序，優先完成進度最高的建築
             unfinishedBuildings.sort((a, b) => b.progressPercent - a.progressPercent);
             
-            console.log(`發現 ${unfinishedBuildings.length} 個未完成的建築:`);
-            unfinishedBuildings.forEach(({building, progressPercent, currentWorkers, maxWorkers}) => {
-                console.log(`- ${building.type}: ${progressPercent.toFixed(1)}% (工人: ${currentWorkers}/${maxWorkers})`);
-            });
-            
             // 為進度最高的建築分配足夠的工人
             const topBuilding = unfinishedBuildings[0];
             if (topBuilding.currentWorkers < topBuilding.maxWorkers) {
                 const needed = topBuilding.maxWorkers - topBuilding.currentWorkers;
-                console.log(`優先為 ${topBuilding.building.type} (${topBuilding.progressPercent.toFixed(1)}%) 分配 ${needed} 個工人`);
                 
                 this.assignWorkersToBuilding(topBuilding.building, needed, true); // true = 高優先級
             }
@@ -1478,24 +1613,35 @@ class VillagerManager {
                  villager.state === 'movingToTree');
                 
             if (canAssign && !villager.constructionBuilding && !villager.firstCastleMode) {
-                // 清理現有工作
+                console.log(`assignWorkersToBuilding: 重新分配村民 ${villager.id.slice(-8)}, 當前狀態: ${villager.state}, 木材: ${villager.wood}`);
+                
+                // 清理現有工作（但保留資源）
                 if (villager.workingFarm) {
-                    console.log(`從農田調派村民 ${villager.id} 去完成重要建築`);
                     villager.workingFarm.removeWorker?.(villager);
                     villager.workingFarm = null;
                 }
+                
+                // 重要：保存村民的資源
+                const savedWood = villager.wood;
+                const savedFood = villager.food;
                 
                 villager.choppingTree = null;
                 villager.choppingProgress = 0;
                 villager.path = [];
                 villager.target = null;
                 
+                // 恢復資源
+                villager.wood = savedWood;
+                villager.food = savedFood;
+                
+                console.log(`assignWorkersToBuilding: 村民 ${villager.id.slice(-8)} 狀態清理完成，保留資源 - 木材: ${villager.wood}`);
+                
                 // 分配到建築工作
                 if (building.addWorker(villager)) {
                     villager.constructionBuilding = building;
                     villager.state = 'constructing';
                     assigned++;
-                    console.log(`分配村民 ${villager.id} 到建築 ${building.type} (優先級: ${highPriority ? '高' : '普通'})`);
+                    console.log(`assignWorkersToBuilding: 村民 ${villager.id.slice(-8)} 成功分配到 ${building.type}`);
                 }
             }
         }
@@ -1659,7 +1805,6 @@ class VillagerManager {
                 const shouldBeVisible = !isNight && villager.state !== 'hiding' && villager.state !== 'movingToShelter';
                 
                 if (shouldBeVisible && !villager.mesh.visible) {
-                    console.warn(`發現隱形村民 ${villager.id} (狀態: ${villager.state})，正在修復...`);
                     villager.setVisibility(true);
                     fixedCount++;
                 }
@@ -1683,7 +1828,6 @@ class VillagerManager {
         let overlapCount = 0;
         for (const [pos, villagerIds] of positionMap) {
             if (villagerIds.length > 1) {
-                console.warn(`位置 ${pos} 有 ${villagerIds.length} 個村民重疊: ${villagerIds.join(', ')}`);
                 overlapCount += villagerIds.length - 1;
                 
                 // 自動分離重疊的村民
@@ -1692,29 +1836,23 @@ class VillagerManager {
         }
         
         if (fixedCount > 0) {
-            console.log(`修復了 ${fixedCount} 個意外隱形的村民`);
+            // 修復了一些隱形村民
         }
-        
-        console.log(`村民可見性檢查: 總數 ${this.villagers.size}, 可見 ${visibleCount}, 隱藏 ${hiddenCount}, 重疊 ${overlapCount}`);
     }
     
     // 分離重疊的村民
     separateOverlappingVillagers(villagerIds) {
-        console.log(`正在分離重疊的村民: ${villagerIds.join(', ')}`);
-        
         for (let i = 1; i < villagerIds.length; i++) {
             const villager = this.villagers.get(villagerIds[i]);
             if (villager && villager.mesh) {
                 // 在原位置周圍尋找新位置
                 const newPos = this.findNearbyPosition(villager.mesh.position.x, villager.mesh.position.z, 3);
                 if (newPos) {
-                    console.log(`將村民 ${villager.id} 從 (${Math.round(villager.mesh.position.x)}, ${Math.round(villager.mesh.position.z)}) 移動到 (${newPos.x}, ${newPos.z})`);
                     villager.mesh.position.set(newPos.x, 0, newPos.z);
                     villager.x = newPos.x;
                     villager.z = newPos.z;
                     
                     // 重置村民狀態，讓他們重新尋找任務
-                    console.log(`重置村民 ${villager.id} 的狀態，從 ${villager.state} 改為 idle`);
                     villager.state = 'idle';
                     villager.target = null;
                     villager.workingFarm = null;
@@ -1729,15 +1867,11 @@ class VillagerManager {
         
         // 給分離的村民一些時間穩定，然後重新分配任務
         setTimeout(() => {
-            console.log('重新分配任務給所有村民...');
             this.reassignAllVillagers();
             
             // 再次顯示狀態，確認任務分配成功
             setTimeout(() => {
-                console.log('=== 任務重新分配後的村民狀態 ===');
-                for (const villager of this.villagers.values()) {
-                    console.log(`${villager.id}: 狀態=${villager.state}, 目標=${villager.target ? 'yes' : 'no'}, 農田=${villager.workingFarm ? 'yes' : 'no'}`);
-                }
+                // 任務重新分配完成
             }, 2000);
         }, 1000);
     }
@@ -1889,7 +2023,38 @@ class VillagerManager {
         ];
         
         let fixedCount = 0;
+        let removedCount = 0;
+        const buildingsToRemove = [];
+        
         allBuildings.forEach(building => {
+            // 檢查建築位置是否在地圖範圍內 (0-199)
+            const isOutOfBounds = building.x < 0 || building.x >= this.grid.size || 
+                                 building.y < 0 || building.y >= this.grid.size ||
+                                 building.z < 0 || building.z >= this.grid.size;
+            
+            if (isOutOfBounds) {
+                console.warn(`發現超出邊界的建築 ${building.type} at (${building.x}, ${building.y || building.z})`);
+                buildingsToRemove.push(building);
+                
+                // 釋放被困的工人
+                if (building.constructionWorkers) {
+                    building.constructionWorkers.forEach(worker => {
+                        console.log(`釋放被困工人 ${worker.id.slice(-8)} 從超界建築`);
+                        worker.constructionBuilding = null;
+                        worker.state = 'idle';
+                        worker.target = null;
+                        worker.path = [];
+                        worker.workPosition = null;
+                        worker.assignedToPart = null;
+                        worker.targetBuildPosition = null;
+                    });
+                    building.constructionWorkers = [];
+                }
+                
+                removedCount++;
+                return;
+            }
+            
             // 檢查建築位置是否有效
             if (building.z === undefined || building.z === null || isNaN(building.z)) {
                 console.warn(`修復建築 ${building.type}: 無效的z坐標 ${building.z}，重新設定為x坐標值`);
@@ -1975,9 +2140,37 @@ class VillagerManager {
             }
         });
         
-        if (fixedCount > 0) {
-            console.log(`修復了 ${fixedCount} 個狀態異常的建築`);
+        // 從建築管理器中移除超界建築
+        if (buildingsToRemove.length > 0) {
+            buildingsToRemove.forEach(building => {
+                // 從對應的建築數組中移除
+                if (building.type === 'castle') {
+                    this.buildingManager.castles = this.buildingManager.castles.filter(b => b !== building);
+                } else if (building.type === 'tower') {
+                    this.buildingManager.towers = this.buildingManager.towers.filter(b => b !== building);
+                } else if (building.type === 'house') {
+                    this.buildingManager.houses = this.buildingManager.houses.filter(b => b !== building);
+                } else if (building.type === 'farm') {
+                    this.buildingManager.farms = this.buildingManager.farms.filter(b => b !== building);
+                }
+                
+                // 從場景中移除3D物件
+                if (building.mesh) {
+                    this.scene.remove(building.mesh);
+                }
+                if (building.group) {
+                    this.scene.remove(building.group);
+                }
+                
+                console.log(`已移除超界建築 ${building.type} from (${building.x}, ${building.y || building.z})`);
+            });
         }
+        
+        if (removedCount > 0 || fixedCount > 0) {
+            console.log(`建築修復完成 - 移除: ${removedCount}, 修復: ${fixedCount}`);
+        }
+        
+        // 修復完成，fixedCount: ${fixedCount}
     }
 
     // 獲取所有村民
@@ -2045,13 +2238,10 @@ class VillagerManager {
     
     // 重新分配所有空閒村民的任務
     reassignAllVillagers() {
-        console.log('開始重新分配村民任務...');
-        
         let idleCount = 0;
         for (const villager of this.villagers.values()) {
             if (villager.state === 'idle' && !villager.target) {
                 idleCount++;
-                console.log(`發現空閒村民: ${villager.id}`);
                 
                 // 優先分配到農田工作
                 const availableFarms = this.buildingManager.farms.filter(farm => 
@@ -2068,17 +2258,12 @@ class VillagerManager {
                     
                     const gridPos = villager.grid.worldToGrid(worldPos.x, worldPos.z);
                     villager.createPath(gridPos.x, gridPos.y);
-                    
-                    console.log(`分配村民 ${villager.id} 到農田`);
                 } else {
                     // 沒有空閒農田，去砍樹
-                    console.log(`村民 ${villager.id} 去砍樹 (沒有空閒農田)`);
                     villager.state = 'idle'; // 讓村民在下次更新時自動尋找樹木
                 }
             }
         }
-        
-        console.log(`重新分配完成，處理了 ${idleCount} 個空閒村民`);
     }
     
     // 強制修復停滯的建築
@@ -2132,6 +2317,272 @@ class VillagerManager {
         });
         
         console.log(`強制修復完成，處理了 ${fixedCount} 個工人重新分配`);
+        return fixedCount;
+    }
+
+    // 調試工具：為村民創建發光標記
+    debugCreateVillagerMarkers() {
+        console.log('=== 創建村民位置標記 ===');
+        
+        // 清除舊的標記
+        if (this.debugMarkers) {
+            this.debugMarkers.forEach(marker => {
+                this.scene.remove(marker);
+            });
+        }
+        this.debugMarkers = [];
+        
+        let markerCount = 0;
+        for (const villager of this.villagers.values()) {
+            if (villager.mesh) {
+                // 創建超高發光標記 - 高度8個單位，確保能看到
+                const geometry = new THREE.BoxGeometry(0.4, 8, 0.4); // 高度8個單位，寬度0.4
+                const material = new THREE.MeshBasicMaterial({ 
+                    color: villager.mesh.visible ? 0x00ff00 : 0xff0000,
+                    transparent: true,
+                    opacity: 1.0, // 完全不透明，更明顯
+                    emissive: villager.mesh.visible ? 0x004400 : 0x440000 // 更亮的發光效果
+                });
+                
+                const marker = new THREE.Mesh(geometry, material);
+                marker.position.set(
+                    villager.mesh.position.x,
+                    4.0, // 高度4.0，讓標記底部在地面上，頂部高達8個單位
+                    villager.mesh.position.z
+                );
+                
+                // 添加文字標籤（簡化的ID）
+                marker.userData = {
+                    type: 'villager_marker',
+                    villagerId: villager.id,
+                    shortId: villager.id.slice(-8),
+                    visible: villager.mesh.visible,
+                    state: villager.state
+                };
+                
+                this.scene.add(marker);
+                this.debugMarkers.push(marker);
+                markerCount++;
+                
+                console.log(`標記村民 ${villager.id.slice(-8)}: 位置(${Math.round(villager.mesh.position.x)}, ${Math.round(villager.mesh.position.z)}) 可見:${villager.mesh.visible} 狀態:${villager.state}`);
+            }
+        }
+        
+        console.log(`創建了 ${markerCount} 個村民標記`);
+        return markerCount;
+    }
+
+    // 調試工具：移除村民標記
+    debugRemoveVillagerMarkers() {
+        if (this.debugMarkers) {
+            this.debugMarkers.forEach(marker => {
+                this.scene.remove(marker);
+            });
+            this.debugMarkers = [];
+            console.log('已移除所有村民標記');
+        }
+    }
+
+    // 修復村民材質問題
+    debugFixVillagerMaterials() {
+        console.log('=== 修復村民材質 ===');
+        
+        let fixedCount = 0;
+        for (const villager of this.villagers.values()) {
+            if (villager.mesh && !villager.mesh.material) {
+                // 重新創建村民材質
+                const material = new THREE.MeshLambertMaterial({ 
+                    color: 0x8B4513,
+                    transparent: false
+                });
+                villager.mesh.material = material;
+                fixedCount++;
+                console.log(`修復村民 ${villager.id.slice(-8)} 的材質`);
+            }
+        }
+        
+        console.log(`修復了 ${fixedCount} 個村民的材質問題`);
+        return fixedCount;
+    }
+
+    // 強制重新創建所有村民
+    debugRecreateVillagers() {
+        console.log('=== 重新創建問題村民 ===');
+        
+        const brokenVillagers = [];
+        for (const villager of this.villagers.values()) {
+            if (!villager.mesh || !villager.mesh.material) {
+                brokenVillagers.push({
+                    id: villager.id,
+                    x: villager.x,
+                    z: villager.z,
+                    state: villager.state
+                });
+            }
+        }
+        
+        brokenVillagers.forEach(info => {
+            const villager = this.villagers.get(info.id);
+            if (villager) {
+                // 移除舊的 mesh
+                if (villager.mesh) {
+                    this.scene.remove(villager.mesh);
+                }
+                
+                // 重新創建 mesh
+                const geometry = new THREE.BoxGeometry(0.5, 1, 0.5);
+                const material = new THREE.MeshLambertMaterial({ 
+                    color: 0x8B4513,
+                    transparent: false
+                });
+                
+                villager.mesh = new THREE.Mesh(geometry, material);
+                villager.mesh.position.set(villager.x, 0, villager.z);
+                villager.mesh.visible = true;
+                
+                this.scene.add(villager.mesh);
+                
+                console.log(`重新創建村民 ${info.id.slice(-8)} 在位置 (${info.x}, ${info.z})`);
+            }
+        });
+        
+        console.log(`重新創建了 ${brokenVillagers.length} 個村民`);
+        return brokenVillagers.length;
+    }
+    
+    // 調試工具：清理超界建築和修復被困村民
+    debugCleanupOutOfBoundsBuildings() {
+        console.log('=== 清理超界建築和修復被困村民 ===');
+        
+        const allBuildings = [
+            ...this.buildingManager.castles.map(b => ({...b, type: 'castle', array: this.buildingManager.castles})), 
+            ...this.buildingManager.towers.map(b => ({...b, type: 'tower', array: this.buildingManager.towers})), 
+            ...this.buildingManager.houses.map(b => ({...b, type: 'house', array: this.buildingManager.houses})), 
+            ...this.buildingManager.farms.map(b => ({...b, type: 'farm', array: this.buildingManager.farms}))
+        ];
+        
+        let removedCount = 0;
+        let rescuedWorkers = 0;
+        const buildingsToRemove = [];
+        
+        allBuildings.forEach(building => {
+            // 檢查建築位置是否在地圖範圍內 (0-199)
+            const isOutOfBounds = building.x < 0 || building.x >= this.grid.size || 
+                                 (building.y !== undefined && (building.y < 0 || building.y >= this.grid.size)) ||
+                                 (building.z !== undefined && (building.z < 0 || building.z >= this.grid.size));
+            
+            if (isOutOfBounds) {
+                console.log(`發現超界建築: ${building.type} at (${building.x}, ${building.y || building.z})`);
+                buildingsToRemove.push(building);
+                
+                // 釋放被困的工人
+                if (building.constructionWorkers && building.constructionWorkers.length > 0) {
+                    building.constructionWorkers.forEach(worker => {
+                        if (worker && this.villagers.has(worker.id)) {
+                            console.log(`  - 釋放被困工人 ${worker.id.slice(-8)}`);
+                            worker.constructionBuilding = null;
+                            worker.state = 'idle';
+                            worker.target = null;
+                            worker.path = [];
+                            worker.workPosition = null;
+                            worker.assignedToPart = null;
+                            worker.targetBuildPosition = null;
+                            rescuedWorkers++;
+                        }
+                    });
+                }
+                
+                // 從建築數組中移除
+                building.array.splice(building.array.indexOf(building), 1);
+                
+                // 從場景中移除3D物件
+                if (building.mesh) {
+                    this.scene.remove(building.mesh);
+                }
+                if (building.group) {
+                    this.scene.remove(building.group);
+                }
+                
+                removedCount++;
+            }
+        });
+        
+        console.log(`清理完成 - 移除建築: ${removedCount}, 拯救工人: ${rescuedWorkers}`);
+        
+        // 重新分配被拯救的村民
+        if (rescuedWorkers > 0) {
+            setTimeout(() => {
+                console.log('重新分配被拯救的村民...');
+                this.ensureConstructionWorkersAssigned();
+                this.reassignVillagersToFarms();
+            }, 500);
+        }
+        
+        return { removedBuildings: removedCount, rescuedWorkers };
+    }
+    
+    // 調試工具：修復卡住的砍樹村民
+    debugFixStuckTreeVillagers() {
+        console.log('=== 修復卡住的砍樹村民 ===');
+        
+        let fixedCount = 0;
+        for (const villager of this.villagers.values()) {
+            if (villager.state === 'movingToTree') {
+                console.log(`發現卡在砍樹的村民 ${villager.id.slice(-8)} at (${Math.round(villager.x)}, ${Math.round(villager.z)})`);
+                
+                // 檢查是否有砍樹目標
+                if (villager.target) {
+                    // 修復座標檢查，確保使用正確的z座標
+                    const targetZ = villager.target.z !== undefined ? villager.target.z : villager.target.y;
+                    const distance = Math.sqrt(
+                        Math.pow(villager.x - villager.target.x, 2) +
+                        Math.pow(villager.z - targetZ, 2)
+                    );
+                    
+                    console.log(`  - 距離目標: ${distance.toFixed(2)}`);
+                    
+                    if (distance < 2.0) {
+                        // 強制轉換為砍樹狀態，使用正確的樹木座標
+                        villager.choppingTree = {
+                            x: villager.target.treeX || villager.target.x,
+                            y: villager.target.treeY || villager.target.y || targetZ
+                        };
+                        villager.state = 'chopping';
+                        villager.choppingProgress = 0;
+                        console.log(`  - 強制轉換為砍樹狀態`);
+                        fixedCount++;
+                    } else {
+                        // 距離太遠，重新計算路徑
+                        const treeX = villager.target.treeX || villager.target.x;
+                        const treeY = villager.target.treeY || villager.target.y || targetZ;
+                        const choppingPos = villager.calculateChoppingPosition(treeX, treeY);
+                        villager.createPath(choppingPos.x, choppingPos.y);
+                        console.log(`  - 重新計算路徑到 (${choppingPos.x}, ${choppingPos.y})`);
+                        fixedCount++;
+                    }
+                } else {
+                    // 沒有砍樹目標，重置為閒置狀態
+                    villager.state = 'idle';
+                    villager.target = null;
+                    villager.path = [];
+                    console.log(`  - 重置為閒置狀態`);
+                    fixedCount++;
+                }
+            } else if (villager.state === 'chopping' && villager.choppingProgress >= 10) {
+                // 砍樹完成但狀態沒有更新
+                console.log(`發現砍樹完成但狀態未更新的村民 ${villager.id.slice(-8)}`);
+                villager.wood = 1;
+                villager.choppingTree = null;
+                villager.choppingProgress = 0;
+                villager.target = null;
+                villager.path = [];
+                villager.state = 'idle';
+                console.log(`  - 強制完成砍樹並設為閒置狀態`);
+                fixedCount++;
+            }
+        }
+        
+        console.log(`修復了 ${fixedCount} 個卡住的砍樹村民`);
         return fixedCount;
     }
 }
