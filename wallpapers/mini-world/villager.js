@@ -320,9 +320,32 @@ class Villager {
 
     // 處理白天來臨
     handleDaybreak() {
-        // 如果在躲避狀態，恢復到idle狀態
+        // 如果在躲避狀態，恢復工作狀態
         if (this.state === 'hiding') {
-            this.state = 'idle';
+            // 如果村民之前有建造工作，恢復建造狀態
+            if (this.constructionBuilding && this.constructionBuilding.isUnderConstruction) {
+                this.state = 'constructing';
+                // 重新設置建造目標
+                this.target = {
+                    x: this.constructionBuilding.x,
+                    z: this.constructionBuilding.z
+                };
+                this.path = [];
+            }
+            // 如果村民之前有農田工作，恢復農業狀態  
+            else if (this.workingFarm && this.workingFarm.isComplete) {
+                this.state = 'farming';
+                this.target = {
+                    x: this.workingFarm.x,
+                    z: this.workingFarm.z
+                };
+                this.path = [];
+            }
+            // 否則設為idle狀態
+            else {
+                this.state = 'idle';
+            }
+            
             this.shelterBuilding = null;
             // 讓村民重新可見，造成從屋內走出的視覺效果
             this.setVisibility(true);

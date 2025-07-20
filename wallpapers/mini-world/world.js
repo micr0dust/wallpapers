@@ -1039,6 +1039,7 @@ class World {
         const limits = this.buildingManager.getBuildingLimits();
         
         // 建造優先級策略：城堡 > 塔樓 > 房舍 > 農田
+        // 但如果高優先級建築被上限阻擋，就先建低級建築解鎖上限
         let buildSuccess = false;
         
         // 1. 優先檢查城堡：未達上限就等100木材建造城堡
@@ -1056,8 +1057,8 @@ class World {
             } else {
                 return; // 等待更多木材，不建造其他建築
             }
-        } 
-        // 3. 塔樓已達上限，檢查房舍：未達上限就等10木材建造房舍
+        }
+        // 3. 塔樓被上限阻擋，檢查房舍：未達上限就等10木材建造房舍來解鎖塔樓
         else if (currentBuildings.houses < limits.house) {
             if (wood >= 10) {
                 buildSuccess = this.aiBuildHouse();
@@ -1065,7 +1066,7 @@ class World {
                 return; // 等待更多木材，不建造其他建築
             }
         } 
-        // 4. 所有高優先級建築都達上限，建造農田（3木材）
+        // 4. 房舍也被上限阻擋，建造農田來解鎖房舍（3木材）
         else if (wood >= 3) {
             buildSuccess = this.aiBuildFarm();
         } 
