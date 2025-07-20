@@ -33,8 +33,8 @@ class ConfigManager {
             console.log('🎯 Wallpaper Engine 環境：使用內建默認值');
             this.defaultValues = {
                 gameSpeed: 1.0,
-                cameraHeight: 80,
-                cameraRadius: 150,
+                cameraHeight: 25,
+                cameraRadius: 35,
                 rotationSpeed: 0.002,
                 fogEnabled: true,
                 autoPlay: true

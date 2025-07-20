@@ -15,8 +15,8 @@ class CameraController {
             console.warn('⚠️ 無法獲取配置，使用內建默認值:', error.message);
             // Wallpaper Engine 安全默認值（與 project.json 一致）
             defaults = {
-                cameraRadius: 150,
-                cameraHeight: 80,
+                cameraRadius: 35,
+                cameraHeight: 25,
                 rotationSpeed: 0.002,
                 fogEnabled: true
             };
