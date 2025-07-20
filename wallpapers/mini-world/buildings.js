@@ -268,6 +268,7 @@ class Castle extends Building {
         this.lastVillagerSpawn = 0;
         this.villagerSpawnInterval = 10000; // 10秒
         this.populationSupport = 5; // 支援5人口
+        this.type = 'castle'; // 添加建築類型
         
         // 城堡需要更多工人來建造
         this.requiredWorkers = 2; // 需要至少2個工人
@@ -567,6 +568,7 @@ class Tower extends Building {
         this.width = 2;
         this.height = 2;
         this.factionColor = factionColor;
+        this.type = 'tower'; // 添加建築類型
         
         // 塔樓只需要1個工人
         this.requiredWorkers = 1;
@@ -739,6 +741,7 @@ class House extends Building {
         this.width = 4;
         this.height = 4;
         this.populationSupport = 5; // 支援5人口
+        this.type = 'house'; // 添加建築類型
         
         // 房舍只需要1個工人
         this.requiredWorkers = 1;
@@ -924,6 +927,7 @@ class Farm extends Building {
         this.height = 6;
         this.exhaustion = 50; // 枯竭程度，50滿，0完全枯竭
         this.maxExhaustion = 50;
+        this.type = 'farm'; // 添加建築類型
         // 農田視覺屬性（不再產生食物，僅作視覺效果）
         this.workingVillager = null;
         this.lastUpdate = Date.now();

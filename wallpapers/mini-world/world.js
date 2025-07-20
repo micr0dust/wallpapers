@@ -1071,7 +1071,7 @@ class World {
             buildSuccess = this.aiBuildFarm();
         } 
         else {
-            return;
+            return; // 木材不足，等待更多資源
         }
         
         // 如果建造失敗，調整建造間隔避免過於頻繁的嘗試

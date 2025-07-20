@@ -1358,8 +1358,17 @@ class VillagerManager {
                 villager.constructionBuilding = null;
             }
             
-            // 設置為閒置狀態，讓村民在白天時重新尋找工作
-            villager.state = 'idle';
+            // 設置合適的狀態，保持工作分配
+            if (savedConstructionBuilding && !savedConstructionBuilding.isComplete) {
+                // 有未完成的建築工作，保持建造狀態但會在夜晚躲避
+                villager.state = 'constructing';
+            } else if (savedWorkingFarm && savedWorkingFarm.isComplete) {
+                // 有農田工作，保持農業狀態但會在夜晚躲避
+                villager.state = 'farming';
+            } else {
+                // 設置為閒置狀態，讓村民在白天時重新尋找工作
+                villager.state = 'idle';
+            }
             
             // 確保村民在地面上（清理任何高度偏移）
             if (villager.mesh) {
@@ -1525,11 +1534,11 @@ class VillagerManager {
             return 1000 + (progress / maxProgress) * 100;
         }
         
-        // 新建築按類型優先級
+        // 新建築按類型優先級：城堡 > 塔樓 > 房舍 > 農田
         switch (building.type) {
             case 'castle': return 100;
-            case 'house': return 80;
-            case 'tower': return 60;
+            case 'tower': return 80;
+            case 'house': return 60;
             case 'farm': return 40;
             default: return 20;
         }
@@ -2144,10 +2153,6 @@ class VillagerManager {
                 
                 console.log(`已移除超界建築 ${building.type} from (${building.x}, ${building.y || building.z})`);
             });
-        }
-        
-        if (removedCount > 0 || fixedCount > 0) {
-            console.log(`建築修復完成 - 移除: ${removedCount}, 修復: ${fixedCount}`);
         }
         
         // 修復完成，fixedCount: ${fixedCount}
