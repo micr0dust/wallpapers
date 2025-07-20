@@ -14,9 +14,9 @@ class Villager {
         this.state = 'idle'; // idle, movingToTree, chopping, movingToCastle, movingToFarm, farming, harvestingFarm, hiding, movingToShelter, movingToConstruction, constructing
         this.target = null;
         this.path = [];
-        this.moveSpeed = 0.5; // 每2tick走一步
+        this.moveSpeed = 0.125; // 調慢到0.25倍速度
         this.lastMoveTime = 0;
-        this.moveInterval = 1000 / 30; // 每2tick (2/60秒) = 1000/30毫秒
+        this.moveInterval = 1000 / 7.5; // 調慢移動間隔到原來的0.25倍
         
         // 工作狀態
         this.workingFarm = null;

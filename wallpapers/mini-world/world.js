@@ -15,7 +15,7 @@ class World {
         
         // 遊戲狀態
         this.isPaused = false;
-        this.gameSpeed = 1;
+        this.gameSpeed = 0.25;
         this.lastUpdateTime = 0;
         
         // AI建造策略
@@ -303,7 +303,9 @@ class World {
         // 計算當前時間（0-1，其中0=午夜，0.25=6:00，0.5=正午，0.75=18:00）
         // 添加0.25的偏移量，讓遊戲從6:00開始
         const timeOffset = 0.25; // 6:00開始的偏移
-        this.lightingSystem.timeOfDay = ((currentTime % this.lightingSystem.dayDuration) / this.lightingSystem.dayDuration + timeOffset) % 1;
+        // 應用遊戲速度到時間計算
+        const adjustedTime = currentTime * this.gameSpeed;
+        this.lightingSystem.timeOfDay = ((adjustedTime % this.lightingSystem.dayDuration) / this.lightingSystem.dayDuration + timeOffset) % 1;
         
         // 將時間轉換為小時（0-24）
         const gameHour = this.lightingSystem.timeOfDay * 24;
@@ -677,6 +679,13 @@ class World {
         // 計算是否為夜晚
         const gameHour = this.lightingSystem.timeOfDay * 24;
         const isNight = gameHour < 5 || gameHour > 19;
+        
+        // 設定全局遊戲時間供村民系統使用
+        window.gameTime = {
+            currentHour: gameHour,
+            timeOfDay: this.lightingSystem.timeOfDay,
+            isNight: isNight
+        };
         
         // 更新相機
         this.cameraController.update();
