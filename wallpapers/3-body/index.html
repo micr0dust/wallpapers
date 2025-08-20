@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<title>三體 3Body</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  html,body { margin:0; padding:0; overflow:hidden; background:#000; color:#ccc; font-family:system-ui,Arial; }
+</style>
+</head>
+<body>
+<script src="three.min.js"></script>
+<script>
+/* ------------------- 參數設定 ------------------- */
+const G = 6.0;              // 重力常數（縮放後）
+const dt = 0.01;            // 積分步長（固定）
+const softening2 = 200;     // 軟化避免奇異
+const bodies = [];          // 全體天體
+let starA, starB, starC, planet; // 全域引用方便更新資訊 / uniforms
+
+/* ------------------- Three.js 基本場景 ------------------- */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = false; // 這裡關閉陰影減少成本
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.35;
+renderer.physicallyCorrectLights = false; // 使用非物理光方便無衰減
+
+document.body.appendChild(renderer.domElement);
+const camera = new THREE.PerspectiveCamera(65, window.innerWidth/window.innerHeight, 0.1, 100000);
+
+/* ------------------- 環境光 ------------------- */
+scene.add(new THREE.AmbientLight(0x060606));
+scene.add(new THREE.HemisphereLight(0x222233, 0x000000, 0.15));
+
+// (已移除星空背景)
+/* ------------------- 顏色與光源 ------------------- */
+// 色溫轉 RGB (簡化版)
+function kelvinToColor(k){k=Math.min(40000,Math.max(1000,k))/100;let r,g,b; // clamp
+  if(k<=66){r=255;g=99.4708025861*Math.log(k)-161.1195681661;b=k<=19?0:138.5177312231*Math.log(k-10)-305.0447927307;}else{r=329.698727446*Math.pow(k-60,-0.1332047592);g=288.1221695283*Math.pow(k-60,-0.0755148492);b=255;}
+  const clamp=v=>Math.min(255,Math.max(0,v));return (clamp(r)<<16)|(clamp(g)<<8)|clamp(b);
+}
+
+/* ------------------- 建立恆星 ------------------- */
+function makeStar(mass, radius, color, position, velocity){
+  if(typeof color==='number' && color>1000 && color>0xFFFFFF) color = kelvinToColor(color);
+  const geo = new THREE.SphereGeometry(radius, 48, 48);
+  const mat = new THREE.MeshBasicMaterial({ color });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.copy(position);
+  scene.add(mesh);
+  function addGlow(scale,opacity){
+    const c=document.createElement('canvas');c.width=c.height=64;const g=c.getContext('2d');
+    const grd=g.createRadialGradient(32,32,0,32,32,32);grd.addColorStop(0,'rgba(255,255,255,'+opacity+')');grd.addColorStop(0.25,'rgba(255,255,255,'+opacity*0.85+')');grd.addColorStop(1,'rgba(0,0,0,0)');
+    g.fillStyle=grd;g.fillRect(0,0,64,64);
+    const tex=new THREE.CanvasTexture(c);
+    const smat=new THREE.SpriteMaterial({map:tex, color, transparent:true, blending:THREE.AdditiveBlending, depthWrite:false});
+    const sp=new THREE.Sprite(smat);sp.scale.set(radius*5*scale/5,radius*5*scale/5,1);mesh.add(sp);
+  }
+  addGlow(5,0.55);addGlow(9,0.25);addGlow(14,0.12);
+  // 無衰減高亮點光 (distance=0 / decay=0) 讓行星遠距仍被照
+  const light = new THREE.PointLight(new THREE.Color(color), 120, 0, 0);
+  mesh.add(light);
+  return { mass, radius, mesh, velocity: velocity.clone(), accel: new THREE.Vector3(), isStar:true, light };
+}
+
+/* ------------------- 行星 Shader (亮面可見, 背面全黑) ------------------- */
+function makePlanetShader(earthTexture){
+  const uniforms = {
+    starPositions: { value: [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()] },
+    planetMap: { value: earthTexture },
+  };
+  const vertex = `
+    varying vec3 vNormal; varying vec3 vWorldPos; varying vec2 vUv;\n
+    void main(){
+      vUv = uv;\n
+      vec4 wp = modelMatrix * vec4(position,1.0);\n
+      vWorldPos = wp.xyz;\n
+      vNormal = normalize(mat3(modelMatrix) * normal);\n
+      gl_Position = projectionMatrix * viewMatrix * wp;\n
+    }`;
+  const fragment = `
+    precision highp float;\n
+    uniform vec3 starPositions[3];\n
+    uniform sampler2D planetMap;\n
+    varying vec3 vNormal; varying vec3 vWorldPos; varying vec2 vUv;\n
+    void main(){
+      float maxLambert = 0.0;\n
+      for(int i=0;i<3;i++){
+        vec3 L = normalize(starPositions[i] - vWorldPos);\n
+        float d = max(dot(normalize(vNormal), L), 0.0);\n
+        if(d > maxLambert) maxLambert = d;\n
+      }\n
+      if(maxLambert <= 0.0){ gl_FragColor = vec4(0.0); return; }\n
+      vec3 tex = texture2D(planetMap, vUv).rgb;\n
+      float brightness = pow(maxLambert, 0.8);\n
+      gl_FragColor = vec4(tex * brightness, 1.0);\n
+    }`;
+  return { uniforms, vertex, fragment };
+}
+
+function makePlanet(mass, radius, texture, position, velocity){
+  const geo = new THREE.SphereGeometry(radius, 128, 128);
+  const shaderDef = makePlanetShader(texture);
+  const mat = new THREE.ShaderMaterial({
+    uniforms: shaderDef.uniforms,
+    vertexShader: shaderDef.vertex,
+    fragmentShader: shaderDef.fragment
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.copy(position);
+  scene.add(mesh);
+  return { mass, radius, mesh, velocity: velocity.clone(), accel:new THREE.Vector3(), isStar:false, shaderUniforms: shaderDef.uniforms };
+}
+
+/* ------------------- 載入行星貼圖 (若無 earth.jpg 則程式自製假貼圖) ------------------- */
+// 你可以放任何 "equirectangular"（經緯投影）地球 / 行星貼圖，命名為 earth.jpg。
+// 建議尺寸 1024x512 或 2048x1024。沒有的話會自動生成藍色海洋 + 綠色陸地噪點。
+const texLoader = new THREE.TextureLoader();
+let planetTexture = new THREE.Texture();
+function startAfterTexture(){ initSystem(); animate(performance.now()); }
+texLoader.load('earth.jpg', t=>{ planetTexture = t; planetTexture.colorSpace = THREE.SRGBColorSpace; startAfterTexture(); }, ()=>{}, ()=>{ // onError -> 生成替代
+  const canvas = document.createElement('canvas'); canvas.width = canvas.height = 512; const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#0b285a'; ctx.fillRect(0,0,512,512);
+  ctx.fillStyle='#1f6d2a';
+  for(let i=0;i<1500;i++){ ctx.beginPath(); ctx.arc(Math.random()*512, Math.random()*512, Math.random()*6+1, 0, Math.PI*2); ctx.fill(); }
+  planetTexture = new THREE.CanvasTexture(canvas); planetTexture.colorSpace = THREE.SRGBColorSpace; startAfterTexture();
+});
+
+/* ------------------- 初始條件 ------------------- */
+function initSystem(){
+  const d = 220; // 三星大致間距尺度
+  // 初始位置：等邊三角形 (Z=0 平面)
+  starA = makeStar(1800, 32, 0xffdd55, new THREE.Vector3(d, 0, 0),                   new THREE.Vector3(0, 0.42, 0.35));
+  starB = makeStar(1500, 28, 0xff8844, new THREE.Vector3(-d/2, +d*Math.sqrt(3)/2, 0), new THREE.Vector3(-0.36, -0.18, -0.25));
+  starC = makeStar(1200, 24, 0xff4444, new THREE.Vector3(-d/2, -d*Math.sqrt(3)/2, 0), new THREE.Vector3(+0.36, -0.18, -0.10));
+  planet = makePlanet(2, 12, planetTexture, new THREE.Vector3(0, 0, 520), new THREE.Vector3(1.0, 0.4, 0));
+  bodies.push(starA, starB, starC, planet);
+}
+
+/* ------------------- 引力加速度 ------------------- */
+function computeAccelerations(){
+  for(const b of bodies) b.accel.set(0,0,0);
+  for(let i=0;i<bodies.length;i++){
+    for(let j=i+1;j<bodies.length;j++){
+      const bi = bodies[i];
+      const bj = bodies[j];
+      const rVec = new THREE.Vector3().subVectors(bj.mesh.position, bi.mesh.position);
+      const r2 = rVec.lengthSq() + softening2;
+      const invR = 1/Math.sqrt(r2);
+      const invR3 = invR*invR*invR;
+      const f = G * bi.mass * bj.mass * invR3;
+      const fVec = rVec.multiplyScalar(f);
+      bi.accel.add(fVec.clone().divideScalar(bi.mass));
+      bj.accel.sub(fVec.clone().divideScalar(bj.mass));
+    }
+  }
+}
+
+/* ------------------- Leapfrog 積分 ------------------- */
+let integratorInitialized = false;
+function leapfrogStep(h){
+  if(!integratorInitialized){
+    computeAccelerations();
+    for(const b of bodies) b.velocity.add(b.accel.clone().multiplyScalar(0.5*h));
+    integratorInitialized = true;
+  }
+  for(const b of bodies){ b.mesh.position.add(b.velocity.clone().multiplyScalar(h)); }
+  computeAccelerations();
+  for(const b of bodies){ b.velocity.add(b.accel.clone().multiplyScalar(0.5*h)); }
+  if(planet) planet.mesh.rotation.y += h*0.8; // 行星自轉
+}
+
+/* ------------------- 視角：質心環繞 ------------------- */
+let camAngle = 0;
+let camRadius = 800; // 當前半徑
+function updateCamera(){
+  if(!starA || !starB || !starC) return;
+  const stars = [starA, starB, starC];
+  // 以三顆恆星計算質心（忽略行星避免被行星軌道拉遠）
+  let totalMass = 0; const com = new THREE.Vector3();
+  for(const s of stars){ com.add(s.mesh.position.clone().multiplyScalar(s.mass)); totalMass += s.mass; }
+  com.divideScalar(totalMass);
+  // 計算三顆恆星包圍盒尺寸
+  const min = new THREE.Vector3( Infinity,  Infinity,  Infinity);
+  const max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+  for(const s of stars){ const p = s.mesh.position; min.min(p); max.max(p); }
+  const spanVec = max.clone().sub(min); // 尺寸向量
+  const largestSpan = Math.max(spanVec.x, spanVec.y, spanVec.z);
+  const targetRadius = largestSpan * 1.25 + 120; // 加 margin
+  // 平滑插值避免跳動
+  camRadius = THREE.MathUtils.lerp(camRadius, targetRadius, 0.05);
+  camAngle += 0.15 * dt; // 固定角速度
+  const elev = 0.35; // 相對高度比例
+  camera.position.set(
+    com.x + Math.cos(camAngle) * camRadius,
+    com.y + camRadius * elev,
+    com.z + Math.sin(camAngle) * camRadius
+  );
+  camera.lookAt(com);
+}
+
+/* ------------------- 主循環 ------------------- */
+let lastT = performance.now();
+function animate(t){
+  requestAnimationFrame(animate);
+  const realDt = (t - lastT) / 1000; // 實際秒
+  lastT = t;
+  const steps = Math.max(1, Math.min(8, Math.round(realDt * 60))); // 上限限制避免掉幀爆 dt
+  for(let s=0;s<steps;s++) leapfrogStep(dt);
+  if(planet && planet.shaderUniforms){
+    planet.shaderUniforms.starPositions.value[0].copy(starA.mesh.position);
+    planet.shaderUniforms.starPositions.value[1].copy(starB.mesh.position);
+    planet.shaderUniforms.starPositions.value[2].copy(starC.mesh.position);
+  }
+  updateCamera();
+  renderer.render(scene, camera);
+}
+
+/* ------------------- 視窗縮放 ------------------- */
+window.addEventListener('resize', ()=>{
+  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// (已移除所有滑鼠 / 鍵盤互動與光源模式切換)
+
+</script>
+</body>
+</html>
