@@ -4,33 +4,5 @@
   "title": "三體 3Body",
   "preview": "preview.jpg",
   "description": "Triple-star gravitational N-body simulation with a single planet. Stars follow mutual gravity (leapfrog integrator). Planet shows only the illuminated hemisphere via custom shader.",
-  "supportsaudioprocessing": false,
-  "general": {
-    "properties": {
-      "rotationSpeed": {
-        "type": "slider",
-        "text": "Camera Orbit Speed",
-        "min": 0.02,
-        "max": 0.6,
-        "step": 0.01,
-        "value": 0.15
-      },
-      "planetSpin": {
-        "type": "slider",
-        "text": "Planet Self Rotation Speed",
-        "min": 0.0,
-        "max": 3.0,
-        "step": 0.05,
-        "value": 0.8
-      },
-      "starGlow": {
-        "type": "slider",
-        "text": "Star Glow Intensity",
-        "min": 0.2,
-        "max": 2.5,
-        "step": 0.05,
-        "value": 1.0
-      }
-    }
-  }
+  "supportsaudioprocessing": false
 }
