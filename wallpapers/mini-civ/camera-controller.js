@@ -1,135 +1,71 @@
-// 相機控制器 - 以市中心為中心旋轉，遠處用霧來模糊
+// 相機控制器 —— 緩慢電影式環繞，隨城市擴張自動拉遠；瀏覽器中可拖曳/滾輪（WE 中無影響）
 class CameraController {
     constructor(camera, scene, renderer) {
         this.camera = camera;
         this.scene = scene;
         this.renderer = renderer;
-        
-        // 從配置管理器讀取默認值，如果失敗則使用安全的默認值
-        let defaults = {};
-        try {
-            if (window.configManager) {
-                defaults = window.configManager.getDefaults();
-            }
-        } catch (error) {
-            console.warn('⚠️ 無法獲取配置，使用內建默認值:', error.message);
-            // Wallpaper Engine 安全默認值（與 project.json 一致）
-            defaults = {
-                cameraRadius: 35,
-                cameraHeight: 25,
-                rotationSpeed: 0.002,
-                fogEnabled: true
-            };
-        }
-        
-        // 相機參數 - 從配置或使用默認值
-        this.radius = defaults.cameraRadius;  // 旋轉半徑
-        this.height = defaults.cameraHeight;   // 相機高度
-        this.angle = 0;     // 旋轉角度
-        this.rotationSpeed = defaults.rotationSpeed; // 旋轉速度
-        
-        // 市中心位置
-        this.centerX = 0;
-        this.centerZ = 0;
-        
-        this.setupFog(defaults.fogEnabled !== false);
-        this.setupCamera();
-        
-        console.log('相機控制器初始化，使用配置:', {
-            radius: this.radius,
-            height: this.height,
-            rotationSpeed: this.rotationSpeed,
-            fogEnabled: defaults.fogEnabled !== false
+        this.angle = Math.PI * 0.2;
+        this.time = 0;
+        this.paused = false;
+        this.target = new THREE.Vector3(0, 1.5, 0);
+        this.frameScale = 1;
+        this.userZoom = 1;
+        this.lastInteract = -999;
+        this._look = new THREE.Vector3();
+        this.bindPointer();
+        this.radius = Config.get('cameraRadius');
+        this.height = Config.get('cameraHeight');
+    }
+
+    bindPointer() {
+        let down = false, lx = 0;
+        const el = window;
+        el.addEventListener('pointerdown', e => { down = true; lx = e.clientX; });
+        el.addEventListener('pointerup', () => { down = false; });
+        el.addEventListener('pointermove', e => {
+            if (!down) return;
+            this.angle -= (e.clientX - lx) * 0.006; lx = e.clientX;
+            this.lastInteract = this.time;
         });
+        el.addEventListener('wheel', e => {
+            this.userZoom = Util.clamp(this.userZoom * (1 + Math.sign(e.deltaY) * 0.08), 0.45, 2.2);
+            this.lastInteract = this.time;
+        }, { passive: true });
     }
 
-    setupFog(enabled) {
-        // 設置霧效果，使用指數霧創造更濃密的效果（適應200x200地圖）
-        if (enabled) {
-            this.scene.fog = new THREE.FogExp2(0x87CEEB, 0.015); // 使用指數霧，密度0.015平衡可見度和遮蔽效果
-        } else {
-            this.scene.fog = null;
-        }
-        this.renderer.setClearColor(0x87CEEB); // 設置背景色為天藍色
-    }
+    pause() { this.paused = true; }
+    resume() { this.paused = false; }
+    updateFogColor() {}
+    setRadius(r) { this.radius = r; }
+    setHeight(h) { this.height = h; }
 
-    setupCamera() {
-        // 設置相機初始位置
-        this.updateCameraPosition();
-        
-        // 相機總是看向市中心
-        this.camera.lookAt(this.centerX, 0, this.centerZ);
-    }
+    // dt: 秒；center/extent: 城市中心與半徑
+    update(dt, center, extent) {
+        if (this.paused) return;
+        this.time += dt;
+        const cfg = Config.values;
+        this.angle += cfg.rotationSpeed * 0.01 * dt;
 
-    updateCameraPosition() {
-        // 計算相機位置（圍繞市中心旋轉）
-        this.camera.position.x = this.centerX + Math.cos(this.angle) * this.radius;
-        this.camera.position.y = this.height;
-        this.camera.position.z = this.centerZ + Math.sin(this.angle) * this.radius;
-    }
+        // 自動取景：城市越大，鏡頭越遠
+        const wantScale = cfg.autoFrame ? Util.clamp(0.6 + extent / 26, 1, 2.8) : 1;
+        const k = 1 - Math.exp(-dt / 3.5);
+        this.frameScale += (wantScale - this.frameScale) * k;
+        if (this.time - this.lastInteract > 12) this.userZoom += (1 - this.userZoom) * (1 - Math.exp(-dt / 5));
 
-    update() {
-        // 更新旋轉角度
-        this.angle += this.rotationSpeed;
-        
-        // 保持角度在 0-2π 範圍內
-        if (this.angle > Math.PI * 2) {
-            this.angle -= Math.PI * 2;
-        }
-        
-        // 更新相機位置
-        this.updateCameraPosition();
-        
-        // 相機總是看向市中心
-        this.camera.lookAt(this.centerX, 0, this.centerZ);
-    }
+        if (window.__look) center = window.__look;   // 除錯用
+        // 視線目標緩慢追隨城市中心
+        this.target.x += (center.x - this.target.x) * k;
+        this.target.z += (center.z - this.target.z) * k;
+        this.target.y = groundY(this.target.x, this.target.z) + 1.5 + this.frameScale * 0.5;
 
-    // 設置新的市中心位置
-    setCenterPosition(x, z) {
-        this.centerX = x;
-        this.centerZ = z;
-    }
-
-    // 調整旋轉半徑
-    setRadius(radius) {
-        this.radius = Math.max(30, Math.min(300, radius)); // 限制半徑範圍（適應200x200地圖）
-    }
-
-    // 調整相機高度
-    setHeight(height) {
-        this.height = Math.max(20, Math.min(200, height)); // 限制高度範圍
-    }
-
-    // 調整旋轉速度
-    setRotationSpeed(speed) {
-        this.rotationSpeed = Math.max(0, Math.min(0.02, speed)); // 限制速度範圍
-    }
-
-    // 暫停/恢復旋轉
-    pause() {
-        this.rotationSpeed = 0;
-    }
-
-    resume(speed = 0.002) {
-        this.rotationSpeed = speed;
-    }
-
-    // 獲取當前相機狀態
-    getStatus() {
-        return {
-            angle: this.angle,
-            radius: this.radius,
-            height: this.height,
-            speed: this.rotationSpeed,
-            center: { x: this.centerX, z: this.centerZ }
-        };
-    }
-
-    // 更新霧的顏色（由光照系統調用）
-    updateFogColor(color) {
-        if (this.scene.fog) {
-            this.scene.fog.color.copy(color);
-        }
-        this.renderer.setClearColor(color);
+        // 呼吸般的緩慢起伏
+        const breathe = 1 + Math.sin(this.time * 0.045) * 0.07;
+        const R = cfg.cameraRadius * this.frameScale * this.userZoom * breathe;
+        const H = cfg.cameraHeight * this.frameScale * this.userZoom * (1 + Math.sin(this.time * 0.031 + 1.3) * 0.06);
+        const cx = this.target.x + Math.cos(this.angle) * R, cz = this.target.z + Math.sin(this.angle) * R;
+        const cy = Math.max(this.target.y - 1.5 - this.frameScale * 0.5 + H, groundY(cx, cz) + 5);   // 不鑽進山裡
+        this.camera.position.set(cx, cy, cz);
+        this.camera.lookAt(this.target);
+        if (Math.abs(this.camera.fov - cfg.cameraFov) > 0.01) { this.camera.fov = cfg.cameraFov; this.camera.updateProjectionMatrix(); }
     }
 }

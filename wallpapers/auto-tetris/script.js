@@ -1254,3 +1254,12 @@ window.wallpaperPropertyListener = {
         }
     }
 };
+
+window.onerror = function(message, source, lineno, colno, error) {
+    console.error("--- 致命錯誤 ---");
+    console.error("訊息:", message);
+    console.error("檔案:", source);
+    console.error("行號:", lineno);
+    console.error("錯誤對象:", error);
+    // 這時候你可以看到最後發生了什麼
+};

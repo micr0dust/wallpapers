@@ -16,7 +16,7 @@ class Villager {
         this.path = [];
         this.moveSpeed = 0.125; // 調慢到0.25倍速度
         this.lastMoveTime = 0;
-        this.moveInterval = 1000 / 7.5; // 調慢移動間隔到原來的0.25倍
+        this.moveInterval = 1000 / 5; // 每秒 5 格（遊戲速度 1x）
         
         // 工作狀態
         this.workingFarm = null;
@@ -45,27 +45,113 @@ class Villager {
     }
 
     create() {
-        // 創建簡單的村民外觀（圓柱體加球體）
+        // 外觀：低多邊形小人，邏輯位置(x,z)與渲染位置分離（平滑移動）
+        this.rig = VillagerRig.build();
         const group = new THREE.Group();
-        
-        // 身體（圓柱體）
-        const bodyGeometry = new THREE.CylinderGeometry(0.3, 0.3, 1.5, 8);
-        const bodyMaterial = new THREE.MeshLambertMaterial({ color: 0x8B4513 });
-        const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial);
-        bodyMesh.position.y = 0.75;
-        group.add(bodyMesh);
-        
-        // 頭部（球體）
-        const headGeometry = new THREE.SphereGeometry(0.3, 8, 6);
-        const headMaterial = new THREE.MeshLambertMaterial({ color: 0xFFDBB3 });
-        const headMesh = new THREE.Mesh(headGeometry, headMaterial);
-        headMesh.position.y = 1.8;
-        group.add(headMesh);
-        
+        group.add(this.rig.root);
         this.mesh = group;
-        this.mesh.position.set(this.x, 0, this.z);
-        this.mesh.visible = true; // 確保初始狀態是可見的
+        this.vx = this.x + 0.5; this.vz = this.z + 0.5;
+        this.offX = (Math.random() - 0.5) * 0.7;
+        this.offZ = (Math.random() - 0.5) * 0.7;
+        this.yaw = Math.random() * 6.28;
+        this.walkPhase = Math.random() * 6.28;
+        this.moveAmt = 0;
+        this.lastSwing = -1;
+        this.insideBuilding = false;
+        this.mesh.position.set(this.vx, groundY(this.vx, this.vz), this.vz);
+        this.mesh.visible = true;
         this.scene.add(this.mesh);
+    }
+
+    // 逐幀視覺更新（dt：真實秒；simMs：遊戲毫秒）
+    updateVisual(dt, simMs) {
+        if (!this.mesh) return;
+        const R = this.rig, w = window.worldInstance;
+        const tx = this.x + 0.5 + this.offX, tz = this.z + 0.5 + this.offZ;
+        let dx = tx - this.vx, dz = tz - this.vz;
+        const dist = Math.hypot(dx, dz);
+        if (dist > 5) { this.vx = tx; this.vz = tz; dx = dz = 0; }
+        else {
+            const k = 1 - Math.exp(-dt * 10);
+            this.vx += dx * k; this.vz += dz * k;
+        }
+        const moving = dist > 0.16 && this.path && this.path.length >= 0 && this.state !== 'hiding';
+        this.moveAmt += ((moving ? 1 : 0) - this.moveAmt) * Math.min(1, dt * 10);
+
+        // 朝向：移動時朝移動方向；工作時朝工作對象
+        let want = null;
+        if (moving && dist > 0.2) want = Math.atan2(dx, dz);
+        else if (this.state === 'chopping' && this.choppingTree) {
+            const ws = this.grid.size / 2;
+            want = Math.atan2(this.choppingTree.x - ws + 0.5 - this.vx, this.choppingTree.y - ws + 0.5 - this.vz);
+        } else if (this.state === 'constructing' && this.constructionBuilding && this.constructionBuilding.group) {
+            const c = this.constructionBuilding.getCenterWorld();
+            want = Math.atan2(c.x - this.vx, c.z - this.vz);
+        }
+        if (want !== null) {
+            let d = want - this.yaw; d = Math.atan2(Math.sin(d), Math.cos(d));
+            this.yaw += d * Math.min(1, dt * 9);
+        }
+
+        // 站在建築足跡內（躲避進屋時）→ 隱藏，看起來像走進門
+        let inside = false;
+        if (this.state === 'movingToShelter' || this.state === 'hiding') {
+            const gp = this.grid.worldToGrid(this.vx - 0.5, this.vz - 0.5);
+            const fp = this.grid.getFootprintAt(gp.x, gp.y);
+            inside = !!(fp && fp.solid);
+        }
+        R.root.visible = !inside;
+        this.mesh.position.set(this.vx, groundY(this.vx, this.vz), this.vz);
+        this.mesh.rotation.y = this.yaw;
+        if (!this.mesh.visible || inside) return;
+
+        // ---- 動作 ----
+        const t = simMs / 1000;
+        this.walkPhase += dt * (6 + 5 * this.moveAmt) * (0.5 + 0.5 * this.moveAmt);
+        const sw = Math.sin(this.walkPhase) * this.moveAmt;
+        R.legL.rotation.x = sw * 0.85; R.legR.rotation.x = -sw * 0.85;
+        R.armL.rotation.x = -sw * 0.7; R.armR.rotation.x = sw * 0.7;
+        R.root.position.y = Math.abs(Math.sin(this.walkPhase)) * 0.06 * this.moveAmt + Math.sin(t * 2 + this.offX * 9) * 0.008;
+        R.root.rotation.x = 0;
+        R.torso.rotation.z = 0;
+        for (const k of Object.keys(R.tools)) R.tools[k].visible = false;
+
+        const idleWork = this.moveAmt < 0.3;
+        if (this.state === 'chopping' && idleWork) {
+            R.tools.axe.visible = true;
+            const ph = (simMs - (this.chopStart || simMs)) / 1000 * 2.2;
+            const s = Math.sin(ph * Math.PI * 2);
+            R.armR.rotation.x = -2.2 + (s > 0 ? s : s * 0.3) * 1.6;
+            R.armL.rotation.x = R.armR.rotation.x * 0.7;
+            R.root.rotation.x = 0.12 + Math.max(0, s) * 0.2;
+            const idx = Math.floor(ph);
+            if (idx !== this.lastSwing && ph > 0.3) {
+                this.lastSwing = idx;
+                if (w && this.choppingTree) {
+                    const ws = this.grid.size / 2;
+                    const px = this.choppingTree.x - ws + 0.5, pz = this.choppingTree.y - ws + 0.5;
+                    if (w.fx) w.fx.chips(px, 1.0, pz, 3);
+                    if (w.treeManager) w.treeManager.pulse(this.choppingTree.x, this.choppingTree.y);
+                }
+            }
+        } else if (this.state === 'constructing' && idleWork) {
+            R.tools.hammer.visible = true;
+            const ph = t * 2.6 + this.offX * 7;
+            R.armR.rotation.x = -1.9 + Math.sin(ph * Math.PI * 2) * 0.9;
+            R.armL.rotation.x = -0.6;
+            R.root.rotation.x = 0.1;
+            const idx = Math.floor(ph);
+            if (idx !== this.lastSwing) { this.lastSwing = idx; if (w && w.fx && idx % 3 === 0) w.fx.dust(this.vx + Math.sin(this.yaw) * 0.6, 0.5, this.vz + Math.cos(this.yaw) * 0.6, 2); }
+        } else if ((this.state === 'harvestingFarm' || this.state === 'farming') && idleWork) {
+            R.tools.hoe.visible = this.state === 'farming';
+            const ph = t * 1.6 + this.offZ * 5;
+            R.root.rotation.x = 0.55 + Math.sin(ph * Math.PI * 2) * 0.1;
+            R.armR.rotation.x = -0.9 + Math.sin(ph * Math.PI * 2) * 0.7;
+            R.armL.rotation.x = -0.9 + Math.cos(ph * Math.PI * 2) * 0.6;
+        }
+        R.log.visible = this.wood > 0; R.log2.visible = this.wood > 1;
+        R.sheaf.visible = this.food > 0;
+        if (this.wood > 0 || this.food > 0) { R.armL.rotation.x = Math.min(R.armL.rotation.x, -1.0); R.armR.rotation.x = Math.min(R.armR.rotation.x, -1.0); }
     }
 
     update(currentTime, treeManager, isNight = false, gameSpeed = 1.0) {
@@ -119,7 +205,7 @@ class Villager {
                 }
             }
             
-            this.mesh.position.set(this.x, yPosition, this.z);
+            if (window.worldInstance && window.worldInstance.pathWear) window.worldInstance.pathWear.step(this.x + 0.5, this.z + 0.5);
             
             // 如果到達目標
             if (!this.path || this.path.length === 0) {
@@ -289,7 +375,7 @@ class Villager {
         
         // 從全局或場景中獲取當前時間
         if (window.gameTime && window.gameTime.currentHour !== undefined) {
-            return window.gameTime.currentHour >= 18 || window.gameTime.currentHour < 6;
+            return !!window.gameTime.isNight;
         }
         
         // 備用方案：使用isNight標記
@@ -530,7 +616,7 @@ class Villager {
         // 最後，如果有完成的城堡且沒有農田可種，才去砍樹（優先度4）
         if (hasCompletedCastle) {
             // 檢查是否在資源上繳冷卻期內（防止立即重新砍樹）
-            const currentTime = Date.now();
+            const currentTime = simNow();
             const cooldownTime = this.lastResourceDeliveryTime ? (currentTime - this.lastResourceDeliveryTime) : 9999;
             
             if (this.lastResourceDeliveryTime && cooldownTime < 2000) {
@@ -592,16 +678,12 @@ class Villager {
 
     handleChoppingState(treeManager) {
         if (this.choppingTree) {
-            // 村民現在在樹的旁邊砍樹，不會重疊遮擋
-            this.choppingProgress++;
-            
-            // 修改：每砍一下就獲得木材並立即上繳，而不是等10次
-            this.wood = 1; // 每砍一下就獲得1木材
-            
-            // 每10次採伐後樹木才會消失
-            if (this.choppingProgress >= 10) {
-                treeManager.chopTree(this.choppingTree.x, this.choppingTree.y);
-            }
+            // 砍樹需要時間（約 1.6 秒，三下斧頭），完成後一次得到 2 單位木材
+            const now = simNow();
+            if (this.choppingProgress === 0) { this.chopStart = now; this.choppingProgress = 1; this.lastSwing = -1; }
+            if (now - this.chopStart < 1600) return;
+            this.wood = 2;
+            if (treeManager) treeManager.chopTree(this.choppingTree.x, this.choppingTree.y);
             
             // 清理砍樹相關狀態
             this.choppingTree = null;
@@ -819,7 +901,7 @@ class Villager {
         const allBuildings = [
             ...this.buildingManager.castles, 
             ...this.buildingManager.towers, 
-            ...this.buildingManager.houses, 
+            ...this.buildingManager.houses, ...this.buildingManager.walls, ...this.buildingManager.mills, 
             ...this.buildingManager.farms.filter(farm => farm.isUnderConstruction) // 只包含建造中的農田
         ];
         
@@ -894,7 +976,7 @@ class Villager {
         const allBuildings = [
             ...this.buildingManager.castles, 
             ...this.buildingManager.towers, 
-            ...this.buildingManager.houses, 
+            ...this.buildingManager.houses, ...this.buildingManager.walls, ...this.buildingManager.mills, 
             ...this.buildingManager.farms.filter(farm => farm.isUnderConstruction) // 只包含建造中的農田
         ];
         
@@ -957,21 +1039,17 @@ class Villager {
             return;
         }
         
-        // 檢查是否需要移動到新的建造位置
-        if (this.targetBuildPosition) {
+        // 確保工人站在目前建造部件的位置（夜晚/重新分配後 targetBuildPosition 會被清除，需重新計算）
+        const partPos = this.constructionBuilding.getPartBuildPosition(this.constructionBuilding.currentBuildStep);
+        if (partPos) {
+            this.targetBuildPosition = partPos;
             const currentGridPos = this.grid.worldToGrid(this.x, this.z);
-            const targetDistance = Math.abs(currentGridPos.x - this.targetBuildPosition.x) + 
-                                 Math.abs(currentGridPos.y - this.targetBuildPosition.y);
-            
+            const targetDistance = Math.abs(currentGridPos.x - partPos.x) + Math.abs(currentGridPos.y - partPos.y);
             if (targetDistance > 1) {
-                // 還未到達目標位置，繼續移動
                 if (this.path.length === 0) {
-                    this.createPath(this.targetBuildPosition.x, this.targetBuildPosition.y);
+                    this.createPath(partPos.x, partPos.y);
                 }
                 return;
-            } else {
-                // 已到達建造位置
-                this.targetBuildPosition = null; // 清除目標位置
             }
         }
         
@@ -1017,7 +1095,7 @@ class Villager {
                 // 設定一個短暫的冷卻期，避免立即重新砍樹
                 this.state = 'idle';
                 this.target = null;
-                this.lastResourceDeliveryTime = Date.now(); // 記錄上繳時間
+                this.lastResourceDeliveryTime = simNow(); // 記錄上繳時間
             }
         } else {
             // 如果找不到城堡，強制重設為閒置狀態，避免卡住
@@ -1033,28 +1111,25 @@ class Villager {
     }
 
     createPath(targetGridX, targetGridY) {
-        // 簡單的直線路徑（可以後續改進為A*尋路）
         const currentGridPos = this.grid.worldToGrid(this.x, this.z);
-        const startX = currentGridPos.x;
-        const startY = currentGridPos.y;
-        
-        const dx = targetGridX - startX;
-        const dy = targetGridY - startY;
+        const startX = currentGridPos.x, startY = currentGridPos.y;
+        targetGridX = Math.max(0, Math.min(this.grid.size - 1, targetGridX));
+        targetGridY = Math.max(0, Math.min(this.grid.size - 1, targetGridY));
+        const dx = targetGridX - startX, dy = targetGridY - startY;
         const distance = Math.sqrt(dx * dx + dy * dy);
-        
-        if (distance === 0) {
+        if (distance === 0) return;
+
+        // 先試 A*（繞開城堡/塔/房舍）；null = 直線即可
+        const route = this.grid.findPath(startX, startY, targetGridX, targetGridY);
+        if (route) {
+            this.path = route.map(c => this.grid.gridToWorld(c.x, c.y));
             return;
         }
-        
         const steps = Math.ceil(distance);
         this.path = [];
-        
         for (let i = 1; i <= steps; i++) {
             const progress = i / steps;
-            const gridX = Math.round(startX + dx * progress);
-            const gridY = Math.round(startY + dy * progress);
-            const worldPos = this.grid.gridToWorld(gridX, gridY);
-            
+            const worldPos = this.grid.gridToWorld(Math.round(startX + dx * progress), Math.round(startY + dy * progress));
             this.path.push({ x: worldPos.x, z: worldPos.z });
         }
     }
@@ -1158,6 +1233,12 @@ class Villager {
                 this.target = null;
                 break;
                 
+            case 'chopping':
+            case 'farming':
+            case 'harvestingFarm':
+            case 'hiding':
+                break;
+
             default:
                 // 處理其他未明確定義的狀態 - 重設為idle
                 this.target = null;
@@ -1226,7 +1307,7 @@ class VillagerManager {
     isNightTime() {
         // 從全局或場景中獲取當前時間
         if (window.gameTime && window.gameTime.currentHour !== undefined) {
-            return window.gameTime.currentHour >= 18 || window.gameTime.currentHour < 6;
+            return !!window.gameTime.isNight;
         }
         
         // 備用方案：使用wasNight標記
@@ -1274,8 +1355,44 @@ class VillagerManager {
             villager.update(currentTime, treeManager, isNight, gameSpeed);
         }
         
+        if (!this.lastWatchdog || currentTime - this.lastWatchdog >= 5000) {
+            this.lastWatchdog = currentTime;
+            this.watchdog(currentTime, isNight);
+        }
+        
         // 移除自動收集邏輯，改由個別村民在到達城堡時直接上繳
         // this.collectWood();
+    }
+
+    // 看門狗：偵測卡住的村民與停工的建築並自動恢復
+    watchdog(currentTime, isNight) {
+        if (isNight) return;
+        const workStates = ['constructing', 'chopping', 'farming', 'harvestingFarm', 'hiding'];
+        for (const v of this.villagers.values()) {
+            const g = this.grid.worldToGrid(v.x, v.z);
+            const key = g.x + ',' + g.y;
+            if (v._wdKey !== key || (v.path && v.path.length > 0) || workStates.includes(v.state)) {
+                v._wdKey = key; v._wdSince = currentTime;
+            } else if (currentTime - v._wdSince > 30000) {
+                v.state = 'idle'; v.target = null; v.path = []; v.choppingTree = null; v.choppingProgress = 0;
+                v._wdSince = currentTime;
+            }
+        }
+        for (const b of this.buildingManager.buildings.values()) {
+            if (b.isUnderConstruction && b.constructionWorkers.length > 0 && currentTime - (b.lastProgress || 0) > 45000) {
+                for (const w of [...b.constructionWorkers]) {
+                    w.constructionBuilding = null; w.state = 'idle'; w.path = []; w.target = null; w.targetBuildPosition = null;
+                }
+                b.constructionWorkers = [];
+                b.lastProgress = currentTime;
+                this.assignWorkersToBuilding(b, b.requiredWorkers, true);
+            }
+        }
+    }
+
+    // 逐幀視覺更新
+    animate(dt, simMs) {
+        for (const v of this.villagers.values()) v.updateVisual(dt, simMs);
     }
 
     collectWood() {
@@ -1445,7 +1562,7 @@ class VillagerManager {
         const allBuildings = [
             ...this.buildingManager.castles, 
             ...this.buildingManager.towers, 
-            ...this.buildingManager.houses, 
+            ...this.buildingManager.houses, ...this.buildingManager.walls, ...this.buildingManager.mills, 
             ...this.buildingManager.farms.filter(farm => farm.isUnderConstruction)
         ];
         
@@ -1553,7 +1670,7 @@ class VillagerManager {
         const allBuildings = [
             ...this.buildingManager.castles, 
             ...this.buildingManager.towers, 
-            ...this.buildingManager.houses, 
+            ...this.buildingManager.houses, ...this.buildingManager.walls, ...this.buildingManager.mills, 
             ...this.buildingManager.farms.filter(farm => farm.isUnderConstruction)
         ];
         
@@ -2005,10 +2122,15 @@ class VillagerManager {
     
     // 修復狀態異常的建築
     fixBrokenBuildings() {
+        // 舊版修復邏輯已由 watchdog() 取代（舊邏輯依賴已不存在的欄位，會誤判）
+        return { removedBuildings: 0, rescuedWorkers: 0 };
+    }
+
+    _legacyFixBrokenBuildings() {
         const allBuildings = [
             ...this.buildingManager.castles, 
             ...this.buildingManager.towers, 
-            ...this.buildingManager.houses, 
+            ...this.buildingManager.houses, ...this.buildingManager.walls, ...this.buildingManager.mills, 
             ...this.buildingManager.farms
         ];
         
@@ -2259,7 +2381,7 @@ class VillagerManager {
         const allBuildings = [
             ...this.buildingManager.castles, 
             ...this.buildingManager.towers, 
-            ...this.buildingManager.houses, 
+            ...this.buildingManager.houses, ...this.buildingManager.walls, ...this.buildingManager.mills, 
             ...this.buildingManager.farms
         ];
         

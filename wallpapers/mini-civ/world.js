@@ -1,1248 +1,682 @@
-// 世界管理器 - 統一管理所有遊戲對象
+// 世界管理器 —— 渲染、地形、日夜、AI 建造策略、主更新迴圈
+
+// 地面磨損：村民走過的路徑會慢慢變成泥土小徑；建築周圍有夯土廣場
+class PathWear {
+    constructor(scene, size) {
+        this.size = size; this.res = 2; this.n = size * this.res;
+        this.data = new Float32Array(this.n * this.n);
+        this.pixels = new Uint8Array(this.n * this.n * 4);
+        const c = Util.color(0x8b6a44);
+        // 貼圖是 sRGB 編碼，直接寫 sRGB 值
+        this.rgb = [0x8b, 0x6a, 0x44];
+        for (let i = 0; i < this.n * this.n; i++) { this.pixels[i * 4] = this.rgb[0]; this.pixels[i * 4 + 1] = this.rgb[1]; this.pixels[i * 4 + 2] = this.rgb[2]; }
+        this.tex = new THREE.DataTexture(this.pixels, this.n, this.n, THREE.RGBAFormat);
+        this.tex.encoding = THREE.sRGBEncoding;
+        this.tex.magFilter = THREE.LinearFilter; this.tex.minFilter = THREE.LinearFilter;
+        this.tex.generateMipmaps = false; this.tex.needsUpdate = true;
+        const mat = new THREE.MeshLambertMaterial({ map: this.tex, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+        const SEG = 100, geo = new THREE.PlaneGeometry(size, size, SEG, SEG).rotateX(-Math.PI / 2);
+        const T = window.worldInstance && window.worldInstance.terrain;
+        if (T) { const pa = geo.attributes.position; for (let i = 0; i < pa.count; i++) pa.setY(i, T.height(pa.getX(i), pa.getZ(i)) + 0.05); }
+        this.mesh = new THREE.Mesh(geo, mat);
+        this.mesh.position.y = 0.0; this.mesh.receiveShadow = true; this.mesh.renderOrder = 1;
+        scene.add(this.mesh);
+        this.dirty = false; this.timer = 0;
+    }
+    idx(wx, wz) {
+        const col = Math.floor((wx + this.size / 2) * this.res), row = Math.floor((this.size / 2 - wz) * this.res);
+        if (col < 1 || row < 1 || col >= this.n - 1 || row >= this.n - 1) return -1;
+        return row * this.n + col;
+    }
+    step(wx, wz) {
+        const i = this.idx(wx, wz);
+        if (i < 0) return;
+        const T = window.worldInstance && window.worldInstance.terrain;
+        if (T && T.height(wx, wz) < T.wl + 0.1) return;     // 水中不磨損
+        const d = this.data, n = this.n;
+        d[i] = Math.min(1, d[i] + 0.035);
+        for (const o of [1, -1, n, -n]) d[i + o] = Math.min(1, d[i + o] + 0.015);
+        this.dirty = true;
+    }
+    stampRect(gx, gy, w, h, strength, margin) {
+        const ws = this.size / 2;
+        const x0 = gx - ws - margin, x1 = gx - ws + w + margin, z0 = gy - ws - margin, z1 = gy - ws + h + margin;
+        for (let wz = z0; wz < z1; wz += 1 / this.res) for (let wx = x0; wx < x1; wx += 1 / this.res) {
+            const i = this.idx(wx, wz); if (i < 0) continue;
+            const ex = Math.min(wx - x0, x1 - wx) / (margin + 0.001), ez = Math.min(wz - z0, z1 - wz) / (margin + 0.001);
+            const edge = Util.clamp(Math.min(ex, ez), 0, 1);
+            const v = strength * (0.55 + 0.45 * edge) * (0.8 + 0.2 * Util.noise2(wx * 1.7, wz * 1.7));
+            if (v > this.data[i]) this.data[i] = v;
+        }
+        this.dirty = true;
+    }
+    update(dt) {
+        this.timer += dt;
+        if (this.timer < 1.5) return;
+        const decayStep = this.timer * 0.0012; this.timer = 0;
+        const d = this.data, p = this.pixels;
+        for (let i = 0; i < d.length; i++) {
+            if (d[i] > 0) { d[i] = Math.max(0, d[i] - decayStep * (d[i] > 0.7 ? 0.0 : 1)); }
+            p[i * 4 + 3] = Math.min(235, Math.pow(d[i], 0.8) * 235);
+        }
+        this.tex.needsUpdate = true;
+    }
+}
+
 class World {
     constructor() {
-        // Three.js 核心組件
-        this.scene = null;
-        this.camera = null;
-        this.renderer = null;
-        this.cameraController = null;
-        
-        // 遊戲系統
-        this.grid = null;
-        this.buildingManager = null;
-        this.villagerManager = null;
-        this.treeManager = null;
-        
-        // 遊戲狀態
+        this.scene = null; this.camera = null; this.renderer = null; this.cameraController = null;
+        this.grid = null; this.buildingManager = null; this.villagerManager = null; this.treeManager = null;
+        this.sky = null; this.fx = null; this.pathWear = null;
         this.isPaused = false;
-        
-        // 從配置管理器讀取默認遊戲速度，如果失敗則使用安全默認值
-        let gameSpeed = 1.0; // 安全默認值
-        try {
-            if (window.configManager) {
-                const defaults = window.configManager.getDefaults();
-                gameSpeed = defaults.gameSpeed || 1.0;
-            }
-        } catch (error) {
-            console.warn('⚠️ 無法獲取遊戲速度配置，使用默認值:', error.message);
-        }
-        
-        this.gameSpeed = gameSpeed;
-        this.lastUpdateTime = 0;
-        
-        // AI建造策略
-        this.aiBuilder = {
-            lastBuildAttempt: 0,
-            buildInterval: 1000, // 每1秒檢查一次建造
-        };
-        
-        // 燈光和光影系統
-        this.lights = [];
-        this.lightingSystem = {
-            timeOfDay: 0.25, // 從早上6:00開始（0.25 = 6:00）
-            dayDuration: 60000, // 一天的長度（毫秒），1分鐘一個循環
-            sunLight: null,
-            moonLight: null,
-            ambientLight: null,
-            skyColor: new THREE.Color(),
-            fogColor: new THREE.Color()
-        };
-    }
-
-    // 初始化世界
-    init(canvas) {
-        console.log('World 初始化，使用配置:', {
-            gameSpeed: this.gameSpeed
-        });
-        
-        this.setupRenderer(canvas);
-        this.setupScene();
-        this.setupCamera();
-        this.setupLighting();
-        this.setupGameSystems();
-        this.setupInitialBuildings();
-        
-        // 設置全局引用，讓農田可以調用更新方法
+        this.gameSpeed = Config.get('gameSpeed');
+        this.simTime = 0;          // 遊戲毫秒
+        this.lastNow = null;
+        this.startHour = 7;
+        this.aiBuilder = { lastBuildAttempt: 0, buildInterval: 1000 };
+        this.lastSpawnCheck = 0;
+        this.cityCenter = new THREE.Vector3();
+        this.cityExtent = 14;
+        this.lastCityScan = -99999;
+        this.hudTimer = 0;
+        this.skyState = null;
         window.worldInstance = this;
     }
 
+    init(canvas) {
+        this.setupRenderer(canvas);
+        this.setupScene();
+        this.setupCamera();
+        this.setupSky();
+        this.terrain = new Terrain();
+        this.createGround();
+        this.setupGameSystems();
+        this.setupInitialBuildings();
+        this.applyAllConfig();
+        Config.onChange((k, v) => this.onConfig(k, v));
+        // 先把時間推進一次，讓第一幀就有正確的光照
+        this.updateTime(0);
+        this.sky.update(0, this.currentHour(), this.cityCenter, this.camera.position);
+    }
+
+    // ---------- 渲染器 / 場景 ----------
     setupRenderer(canvas) {
-        this.renderer = new THREE.WebGLRenderer({ 
-            canvas: canvas,
-            antialias: true,
-            powerPreference: "high-performance"
-        });
-        this.renderer.setSize(window.innerWidth, window.innerHeight);
-        this.renderer.setClearColor(0x87CEEB); // 天藍色背景
-        
-        // 啟用高質量陰影
+        this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance', alpha: false });
+        this.renderer.outputEncoding = THREE.sRGBEncoding;
+        this.renderer.toneMapping = THREE.NoToneMapping;
         this.renderer.shadowMap.enabled = true;
         this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-        
-        // 啟用色調映射以獲得更好的光照效果
-        this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        this.renderer.toneMappingExposure = 1.0;
-        
-        // 啟用伽馬校正
-        this.renderer.gammaOutput = true;
-        this.renderer.gammaFactor = 2.2;
+        this.applyPixelRatio();
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    applyPixelRatio() {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        this.renderer.setPixelRatio(Math.max(0.4, dpr * Config.get('renderScale')));
+        if (this.fx) this.fx.setViewport(window.innerHeight * this.renderer.getPixelRatio(), Config.get('cameraFov'));
     }
 
     setupScene() {
         this.scene = new THREE.Scene();
-        
-        // 添加地面
-        this.createGround();
-    }
-
-    createGround() {
-        const groundSize = 400; // 適應200x200網格（200*2=400）
-        const segments = 200; // 增加地面分段數以支持地形起伏
-        
-        // 創建帶有更多頂點的地面幾何體
-        const groundGeometry = new THREE.PlaneGeometry(groundSize, groundSize, segments, segments);
-        
-        // 使用簡單的噪聲函數生成地形高度
-        this.generateTerrain(groundGeometry, segments);
-        
-        const groundMaterial = new THREE.MeshLambertMaterial({ 
-            color: 0x90EE90, // 淡綠色草地
-            vertexColors: true // 啟用頂點著色以增強地形效果
-        });
-        
-        const ground = new THREE.Mesh(groundGeometry, groundMaterial);
-        ground.rotation.x = -Math.PI / 2;
-        ground.receiveShadow = true;
-        this.scene.add(ground);
-    }
-
-    // 生成地形顏色變化（平坦地形，僅視覺起伏）
-    generateTerrain(geometry, segments) {
-        const vertices = geometry.attributes.position.array;
-        const colors = new Float32Array(vertices.length);
-        
-        // 地形參數
-        const noiseScale = 0.015; // 噪聲縮放（調整地形頻率）
-        
-        for (let i = 0; i < vertices.length; i += 3) {
-            const x = vertices[i];
-            const z = vertices[i + 1];
-            
-            // 保持地形完全平坦
-            vertices[i + 2] = 0; // Y座標固定為0
-            
-            // 檢查是否在農田區域內
-            const farmColor = this.getFarmColorAtPosition(x, z);
-            if (farmColor) {
-                colors[i] = farmColor.r;
-                colors[i + 1] = farmColor.g;
-                colors[i + 2] = farmColor.b;
-            } else {
-                // 使用多層噪聲生成視覺上的「高度」差異（僅影響顏色）
-                let visualHeight = 0;
-                
-                // 大尺度地形特徵
-                visualHeight += this.noise(x * noiseScale * 0.5, z * noiseScale * 0.5) * 0.8;
-                
-                // 中等尺度細節
-                visualHeight += this.noise(x * noiseScale * 1.5, z * noiseScale * 1.5) * 0.3;
-                
-                // 小尺度細節
-                visualHeight += this.noise(x * noiseScale * 4, z * noiseScale * 4) * 0.15;
-                
-                // 微細節
-                visualHeight += this.noise(x * noiseScale * 8, z * noiseScale * 8) * 0.05;
-                
-                // 根據視覺高度設置顏色變化
-                const normalizedHeight = Math.max(0, Math.min(1, (visualHeight + 1) / 2));
-                
-                // 創建更自然的顏色漸變
-                let r, g, b;
-                
-                if (normalizedHeight < 0.3) {
-                    // 低地：深綠色
-                    r = 0.2 + normalizedHeight * 0.3;
-                    g = 0.5 + normalizedHeight * 0.2;
-                    b = 0.1 + normalizedHeight * 0.1;
-                } else if (normalizedHeight < 0.7) {
-                    // 中地：淺綠色
-                    r = 0.3 + (normalizedHeight - 0.3) * 0.4;
-                    g = 0.6 + (normalizedHeight - 0.3) * 0.2;
-                    b = 0.2 + (normalizedHeight - 0.3) * 0.1;
-                } else {
-                    // 高地：黃綠色/土色
-                    r = 0.5 + (normalizedHeight - 0.7) * 0.3;
-                    g = 0.7 + (normalizedHeight - 0.7) * 0.1;
-                    b = 0.3 + (normalizedHeight - 0.7) * 0.2;
-                }
-                
-                colors[i] = r;     // R
-                colors[i + 1] = g; // G
-                colors[i + 2] = b; // B
-            }
-        }
-        
-        // 添加顏色屬性到幾何體
-        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-        
-        // 重新計算法線以獲得正確的光照
-        geometry.computeVertexNormals();
-    }
-
-    // 檢查指定位置是否在農田區域內
-    getFarmColorAtPosition(x, z) {
-        if (!window.farmAreas) return null;
-        
-        for (let farm of window.farmAreas) {
-            const dx = x - farm.x;
-            const dz = z - farm.z;
-            
-            // 如果在農田範圍內 (正方形區域)
-            if (Math.abs(dx) <= farm.size / 2 && Math.abs(dz) <= farm.size / 2) {
-                return farm.color;
-            }
-        }
-        
-        return null;
-    }
-
-    // 更新農田區域的地形顏色
-    updateFarmColors() {
-        if (!window.farmAreas || !this.ground) return;
-        
-        // 重新生成整個地形以包含農田顏色
-        this.generateTerrain(this.ground.geometry, 200);
-    }
-
-    // 檢查是否為夜晚時間（18:00後）
-    isNightTime() {
-        // 從全局或場景中獲取當前時間
-        if (window.gameTime && window.gameTime.currentHour !== undefined) {
-            return window.gameTime.currentHour >= 18 || window.gameTime.currentHour < 6;
-        }
-        
-        // 備用方案：檢查是否當前為夜晚（通過光照判斷）
-        return this.isNight;
-    }
-
-    // 改進的2D噪聲函數（更接近Perlin噪聲的效果）
-    noise(x, y) {
-        // 添加種子值以獲得可重複的結果
-        const seed = 1234;
-        
-        // 整數部分
-        const ix = Math.floor(x);
-        const iy = Math.floor(y);
-        
-        // 小數部分
-        const fx = x - ix;
-        const fy = y - iy;
-        
-        // 平滑插值函數
-        const smooth = (t) => t * t * (3 - 2 * t);
-        
-        // 在四個角點獲取噪聲值
-        const a = this.hash(ix, iy, seed);
-        const b = this.hash(ix + 1, iy, seed);
-        const c = this.hash(ix, iy + 1, seed);
-        const d = this.hash(ix + 1, iy + 1, seed);
-        
-        // 雙線性插值
-        const i1 = this.lerp(a, b, smooth(fx));
-        const i2 = this.lerp(c, d, smooth(fx));
-        
-        return this.lerp(i1, i2, smooth(fy));
-    }
-
-    // 哈希函數，生成偽隨機值
-    hash(x, y, seed) {
-        let h = seed + x * 374761393 + y * 668265263;
-        h = (h ^ (h >> 13)) * 1274126177;
-        h = h ^ (h >> 16);
-        return (h & 0x7fffffff) / 0x7fffffff * 2 - 1; // 歸一化到 -1 到 1
-    }
-
-    // 線性插值
-    lerp(a, b, t) {
-        return a + (b - a) * t;
+        this.scene.fog = new THREE.Fog(0xbcdff2, 90, 380);
     }
 
     setupCamera() {
-        this.camera = new THREE.PerspectiveCamera(
-            75, 
-            window.innerWidth / window.innerHeight, 
-            0.1, 
-            1000
-        );
-        
-        // 創建相機控制器
+        this.camera = new THREE.PerspectiveCamera(Config.get('cameraFov'), window.innerWidth / window.innerHeight, 0.5, 1200);
+        this.camera.position.set(25, 25, 25);
         this.cameraController = new CameraController(this.camera, this.scene, this.renderer);
     }
 
-    setupLighting() {
-        // 環境光（會根據時間動態調整）
-        this.lightingSystem.ambientLight = new THREE.AmbientLight(0x404040, 0.3);
-        this.scene.add(this.lightingSystem.ambientLight);
-        this.lights.push(this.lightingSystem.ambientLight);
-
-        // 太陽光（主要方向光）
-        this.lightingSystem.sunLight = new THREE.DirectionalLight(0xffffff, 1.0);
-        this.lightingSystem.sunLight.castShadow = true;
-        
-        // 設置高質量陰影參數（適應200x200地圖和濃密霧效果）
-        this.lightingSystem.sunLight.shadow.mapSize.width = 4096;
-        this.lightingSystem.sunLight.shadow.mapSize.height = 4096;
-        this.lightingSystem.sunLight.shadow.camera.near = 0.5;
-        this.lightingSystem.sunLight.shadow.camera.far = 400; // 減少遠距離以配合霧效果
-        this.lightingSystem.sunLight.shadow.camera.left = -200; // 適應較小地圖
-        this.lightingSystem.sunLight.shadow.camera.right = 200;
-        this.lightingSystem.sunLight.shadow.camera.top = 200;
-        this.lightingSystem.sunLight.shadow.camera.bottom = -200;
-        this.lightingSystem.sunLight.shadow.bias = -0.0005;
-        
-        this.scene.add(this.lightingSystem.sunLight);
-        this.lights.push(this.lightingSystem.sunLight);
-
-        // 月光（夜間光源）
-        this.lightingSystem.moonLight = new THREE.DirectionalLight(0x9db4ff, 0.2);
-        this.lightingSystem.moonLight.castShadow = false; // 月光不投射陰影
-        
-        this.scene.add(this.lightingSystem.moonLight);
-        this.lights.push(this.lightingSystem.moonLight);
-
-        // 初始化光照狀態（從早上6:00開始）
-        this.updateLighting(0);
+    setupSky() {
+        this.sky = new SkySystem(this.scene, this.camera, this.renderer);
+        this.fx = new Effects(this.scene, this.renderer);
+        this.fx.setViewport(window.innerHeight * this.renderer.getPixelRatio(), Config.get('cameraFov'));
     }
 
-    // 更新動態光照系統
-    updateLighting(currentTime) {
-        // 計算當前時間（0-1，其中0=午夜，0.25=6:00，0.5=正午，0.75=18:00）
-        // 添加0.25的偏移量，讓遊戲從6:00開始
-        const timeOffset = 0.25; // 6:00開始的偏移
-        // 應用遊戲速度到時間計算
-        const adjustedTime = currentTime * this.gameSpeed;
-        this.lightingSystem.timeOfDay = ((adjustedTime % this.lightingSystem.dayDuration) / this.lightingSystem.dayDuration + timeOffset) % 1;
-        
-        // 將時間轉換為小時（0-24）
-        const gameHour = this.lightingSystem.timeOfDay * 24;
-        
-        // 計算太陽角度：6:00為日出（-90度），12:00為正午（0度），18:00為日落（90度）
-        let sunAngle;
-        if (gameHour >= 6 && gameHour <= 18) {
-            // 白天：從6:00到18:00，太陽從東到西
-            const dayProgress = (gameHour - 6) / 12; // 0到1
-            sunAngle = (dayProgress - 0.5) * Math.PI; // -π/2到π/2
-        } else {
-            // 夜晚：太陽在地平線以下
-            if (gameHour < 6) {
-                // 午夜到黎明
-                sunAngle = Math.PI + (gameHour / 6) * Math.PI; // π到2π
-            } else {
-                // 黃昏到午夜
-                sunAngle = Math.PI + ((gameHour - 18) / 6) * Math.PI; // π到2π
-            }
+    // ---------- 地形：高度由 Terrain 提供；頂點色（草地／沙岸／岩石／雪）+ 草地噪點貼圖；河流水面為獨立網格 ----------
+    terrainHeight(x, z) { return this.terrain.height(x, z); }
+
+    createGround() {
+        const T = this.terrain;
+        // 非等距網格：中央 ±110 每格 1 單位，往外逐漸變疏（遠景）
+        const half = [];
+        for (let v = 0; v <= 110; v += 1) half.push(v);
+        { let v = 110, st = 2; while (v < 450) { v = Math.min(450, v + st); half.push(v); st = Math.min(st * 1.3, 40); } }
+        const axis = []; for (let i = half.length - 1; i > 0; i--) axis.push(-half[i]); for (const v of half) axis.push(v);
+        const NA = axis.length, n = NA * NA;
+        const posA = new Float32Array(n * 3), uvA = new Float32Array(n * 2), col = new Float32Array(n * 3), hts = new Float32Array(n);
+        const lightG = Util.color(0x86b64f), midG = Util.color(0x62a042), darkG = Util.color(0x3f7f3d), hillG = Util.color(0x3a6f40), rock = Util.color(0x8b8a80), meadow = Util.color(0x9cc45a);
+        const sand = Util.color(0xcdbf8c), mud = Util.color(0x5f5c47), cliffC = Util.color(0x7d7b72), snow = Util.color(0xf1f4f7), alpine = Util.color(0x9aa079);
+        const c = new THREE.Color();
+        for (let jz = 0; jz < NA; jz++) for (let ix = 0; ix < NA; ix++) {
+            const i = jz * NA + ix, x = axis[ix], z = axis[jz];
+            const h = T.height(x, z); hts[i] = h;
+            posA[i * 3] = x; posA[i * 3 + 1] = h; posA[i * 3 + 2] = z;
+            uvA[i * 2] = x / 14; uvA[i * 2 + 1] = z / 14;
+            const sl = T.slope(x, z);
+            const patch = Util.fbm(x * 0.045 + 7, z * 0.045 + 3, 3);
+            c.copy(midG).lerp(lightG, Util.smoothstep(0.45, 0.7, patch)).lerp(darkG, Util.smoothstep(0.5, 0.25, patch) * 0.8);
+            c.lerp(meadow, Util.smoothstep(0.55, 0.75, Util.fbm(x * 0.09 - 20, z * 0.09 + 11, 2)) * 0.35);
+            const hh = Util.smoothstep(2, 14, h);
+            c.lerp(hillG, hh * 0.8).lerp(alpine, Util.smoothstep(8, 15, h) * 0.7);
+            c.lerp(cliffC, Util.smoothstep(0.42, 0.85, sl) * 0.95);
+            c.lerp(rock, Util.smoothstep(20, 40, h) * 0.8);
+            c.lerp(snow, Util.smoothstep(17.5, 21, h + (Util.noise2(x * 0.2, z * 0.2) - 0.5) * 3) * (1 - Util.smoothstep(0.5, 1.0, sl) * 0.7));
+            // 河岸：沙灘與河床
+            c.lerp(sand, (1 - Util.smoothstep(T.wl + 0.03, T.wl + 0.2, h)) * 0.9);
+            c.lerp(mud, Util.smoothstep(T.wl - 0.05, T.wl - 0.5, h));
+            const j = 1 + (Util.hash2(i, 7) - 0.5) * 0.05;
+            col[i * 3] = c.r * j; col[i * 3 + 1] = c.g * j; col[i * 3 + 2] = c.b * j;
         }
-        
-        // 太陽高度（-1到1，0是地平線）
-        const sunHeight = Math.sin(sunAngle);
-        
-        // 計算太陽位置
-        const sunDistance = 400;
-        let sunX, sunY, sunZ;
-        
-        if (gameHour >= 6 && gameHour <= 18) {
-            // 白天：太陽在天空中
-            const dayProgress = (gameHour - 6) / 12; // 0到1
-            sunX = Math.cos(dayProgress * Math.PI) * sunDistance; // 從東到西
-            sunY = Math.max(50, Math.sin(dayProgress * Math.PI) * 200 + 100); // 弧形軌跡
-            sunZ = 0; // 保持在南北中線
-        } else {
-            // 夜晚：太陽在地平線以下
-            sunX = 0;
-            sunY = -100; // 地平線以下
-            sunZ = 0;
+        const idx = new Uint32Array((NA - 1) * (NA - 1) * 6); let k = 0;
+        for (let jz = 0; jz < NA - 1; jz++) for (let ix = 0; ix < NA - 1; ix++) {
+            const a = jz * NA + ix, b = a + 1, d = a + NA, e = d + 1;
+            idx[k++] = a; idx[k++] = d; idx[k++] = b; idx[k++] = b; idx[k++] = d; idx[k++] = e;
         }
-        
-        this.lightingSystem.sunLight.position.set(sunX, sunY, sunZ);
-        
-        // 計算月亮位置（與太陽相對）
-        const moonX = -sunX * 0.7;
-        const moonY = Math.max(20, 150 - sunY * 0.5);
-        const moonZ = 0;
-        
-        this.lightingSystem.moonLight.position.set(moonX, moonY, moonZ);
-        
-        // 計算光照強度：統一的光照計算系統
-        let dayIntensity = 0;
-        let nightIntensity = 0;
-        
-        if (gameHour >= 5 && gameHour <= 19) {
-            // 從5:00開始的過渡期到19:00結束的過渡期
-            if (gameHour >= 6 && gameHour <= 18) {
-                // 主要白天時段：6:00-18:00
-                const hoursSinceSunrise = gameHour - 6;
-                const dayProgress = hoursSinceSunrise / 12; // 0到1
-                dayIntensity = Math.sin(dayProgress * Math.PI) * 0.8 + 0.2; // 0.2到1.0
-                nightIntensity = 0;
-            } else if (gameHour >= 5 && gameHour < 6) {
-                // 黎明過渡：5:00-6:00，確保光照強度不會低於夜晚
-                const transition = (gameHour - 5) / 1; // 0到1
-                // 使用更好的過渡函數，確保總光照至少為0.3
-                dayIntensity = transition * 0.5; // 從0到0.5
-                nightIntensity = Math.max(0.3 - dayIntensity, 0); // 確保總光照≥0.3
-            } else if (gameHour > 18 && gameHour <= 19) {
-                // 黃昏過渡：18:00-19:00，確保光照強度不會低於夜晚
-                const transition = (19 - gameHour) / 1; // 1到0
-                dayIntensity = transition * 0.5; // 從0.5到0
-                nightIntensity = Math.max(0.3 - dayIntensity, 0); // 確保總光照≥0.3
-            }
-        } else {
-            // 完全夜晚時段：19:00-5:00
-            dayIntensity = 0;
-            nightIntensity = 0.3;
-        }
-        
-        // 設置太陽光強度和顏色
-        if (dayIntensity > 0) {
-            this.lightingSystem.sunLight.intensity = dayIntensity * 1.2;
-            // 只有白天才投射陰影
-            this.lightingSystem.sunLight.castShadow = true;
-            
-            // 根據時間調整顏色溫度
-            if (gameHour >= 10 && gameHour <= 14) {
-                // 正午：白色光
-                this.lightingSystem.sunLight.color.setHex(0xffffff);
-            } else if (gameHour >= 8 && gameHour <= 16) {
-                // 早晨/下午：暖白光
-                this.lightingSystem.sunLight.color.setHex(0xfff4e6);
-            } else {
-                // 黃昏/黎明：橙色光
-                this.lightingSystem.sunLight.color.setHex(0xffb366);
-            }
-        } else {
-            this.lightingSystem.sunLight.intensity = 0;
-            // 夜晚時關閉太陽光陰影
-            this.lightingSystem.sunLight.castShadow = false;
-        }
-        
-        // 設置月光強度
-        this.lightingSystem.moonLight.intensity = nightIntensity;
-        
-        // 環境光強度調整
-        const ambientIntensity = 0.2 + dayIntensity * 0.3 + nightIntensity * 0.1;
-        this.lightingSystem.ambientLight.intensity = ambientIntensity;
-        
-        // 環境光顏色調整
-        if (dayIntensity > 0.3) {
-            // 白天：暖色調環境光
-            this.lightingSystem.ambientLight.color.setHex(0x404040);
-        } else if (nightIntensity > 0.1) {
-            // 夜晚：冷色調環境光
-            this.lightingSystem.ambientLight.color.setHex(0x1a1a2e);
-        } else {
-            // 黃昏/黎明：紫色調環境光
-            this.lightingSystem.ambientLight.color.setHex(0x2d1b69);
-        }
-        
-        // 判斷是否為夜晚
-        const isNight = nightIntensity > 0.1;
-        
-        // 更新建築窗戶光照
-        if (this.buildingManager && this.buildingManager.updateBuildingLighting) {
-            this.buildingManager.updateBuildingLighting(isNight, nightIntensity);
-        }
-        
-        // 更新村民夜晚狀態
-        if (this.villagerManager) {
-            this.villagerManager.isNight = isNight;
-        }
-        
-        // 更新天空和霧的顏色
-        this.updateSkyAndFog(sunHeight, dayIntensity, nightIntensity);
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(posA, 3));
+        geo.setAttribute('uv', new THREE.BufferAttribute(uvA, 2));
+        geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+        geo.setIndex(new THREE.BufferAttribute(idx, 1));
+        geo.computeVertexNormals();
+        const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
+        const tex = this.makeGrassTexture();
+        if (tex) { mat.map = tex; }
+        this.ground = new THREE.Mesh(geo, mat);
+        this.ground.receiveShadow = true;
+        this.scene.add(this.ground);
+        this.createWater(axis, hts, NA);
+        this.pathWear = new PathWear(this.scene, 200);
     }
 
-    // 更新天空和霧的顏色
-    updateSkyAndFog(sunHeight, dayIntensity, nightIntensity) {
-        const gameHour = this.lightingSystem.timeOfDay * 24;
-        let skyColor, fogColor;
-        
-        if (gameHour >= 7 && gameHour <= 17) {
-            // 白天：藍色天空
-            skyColor = new THREE.Color(0x87CEEB);
-            fogColor = new THREE.Color(0x87CEEB);
-        } else if ((gameHour >= 5 && gameHour <= 7) || (gameHour >= 17 && gameHour <= 19)) {
-            // 黃昏/黎明：橙紅色天空
-            if (gameHour >= 5 && gameHour <= 7) {
-                // 黎明：5:00-7:00
-                if (gameHour <= 6) {
-                    // 5:00-6:00：從夜晚深藍到橙紅
-                    const progress = (gameHour - 5) / 1;
-                    skyColor = new THREE.Color().lerpColors(
-                        new THREE.Color(0x0f0f23), // 深藍色（夜晚）
-                        new THREE.Color(0xff7f50), // 橙紅色（黃昏）
-                        progress
-                    );
-                } else {
-                    // 6:00-7:00：從橙紅到藍天
-                    const progress = (gameHour - 6) / 1;
-                    skyColor = new THREE.Color().lerpColors(
-                        new THREE.Color(0xff7f50), // 橙紅色（黃昏）
-                        new THREE.Color(0x87CEEB), // 藍色（白天）
-                        progress
-                    );
-                }
-            } else {
-                // 黃昏：17:00-19:00，平滑過渡從藍天到夜晚
-                const progress = (gameHour - 17) / 2; // 0到1，總共2小時
-                
-                if (progress <= 0.5) {
-                    // 17:00-18:00：從藍天到橙紅（前半段）
-                    const halfProgress = progress * 2; // 0到1
-                    skyColor = new THREE.Color().lerpColors(
-                        new THREE.Color(0x87CEEB), // 藍色（白天）
-                        new THREE.Color(0xff7f50), // 橙紅色（黃昏）
-                        halfProgress
-                    );
-                } else {
-                    // 18:00-19:00：從橙紅到深藍（後半段）
-                    const halfProgress = (progress - 0.5) * 2; // 0到1
-                    skyColor = new THREE.Color().lerpColors(
-                        new THREE.Color(0xff7f50), // 橙紅色（黃昏）
-                        new THREE.Color(0x0f0f23), // 深藍色（夜晚）
-                        halfProgress
-                    );
-                }
-            }
-            fogColor = skyColor.clone();
-        } else {
-            // 夜晚：深藍色天空
-            skyColor = new THREE.Color(0x0f0f23);
-            fogColor = new THREE.Color(0x0f0f23);
+    // 河流水面：只在低於水面的格子附近生成面片；深度做成頂點屬性（深色 / 淺色 / 透明度）
+    createWater(axis, hts, NA) {
+        const T = this.terrain, wl = T.wl;
+        const pos = [], dep = [], idx = [], map = new Map();
+        const vid = (ix, jz) => {
+            const key = jz * NA + ix;
+            let v = map.get(key);
+            if (v === undefined) { v = pos.length / 3; map.set(key, v); pos.push(axis[ix], wl, axis[jz]); dep.push(Math.max(0, wl - hts[key])); }
+            return v;
+        };
+        for (let jz = 0; jz < NA - 1; jz++) for (let ix = 0; ix < NA - 1; ix++) {
+            if (Math.abs(axis[ix]) > 230 || Math.abs(axis[jz]) > 230) continue;
+            const a = jz * NA + ix;
+            if (hts[a] > wl + 0.3 && hts[a + 1] > wl + 0.3 && hts[a + NA] > wl + 0.3 && hts[a + NA + 1] > wl + 0.3) continue;
+            const A = vid(ix, jz), B = vid(ix + 1, jz), D = vid(ix, jz + 1), E = vid(ix + 1, jz + 1);
+            idx.push(A, D, B, B, D, E);
         }
-        
-        // 更新渲染器背景色
-        this.renderer.setClearColor(skyColor);
-        
-        // 更新霧的顏色
-        if (this.scene.fog) {
-            this.scene.fog.color.copy(fogColor);
-        }
-        
-        // 通知相機控制器更新霧的顏色
-        if (this.cameraController && this.cameraController.updateFogColor) {
-            this.cameraController.updateFogColor(fogColor);
-        }
+        if (!idx.length) return;
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+        geo.setAttribute('aDepth', new THREE.Float32BufferAttribute(dep, 1));
+        geo.setIndex(idx);
+        const fog = this.scene.fog;
+        this.waterMat = new THREE.ShaderMaterial({
+            transparent: true, depthWrite: false,
+            uniforms: {
+                uTime: { value: 0 }, uDay: { value: 1 },
+                uDeep: { value: Util.color(0x1f6f8f) }, uShallow: { value: Util.color(0x5fb8b0) }, uSky: { value: new THREE.Color(0xbcdff2) },
+                uFogColor: { value: fog.color.clone() }, uFogNear: { value: fog.near }, uFogFar: { value: fog.far }
+            },
+            vertexShader: `
+                attribute float aDepth; varying float vDepth; varying vec3 vW; varying float vView;
+                void main(){ vDepth=aDepth; vec4 w=modelMatrix*vec4(position,1.0); vW=w.xyz; vec4 mv=viewMatrix*w; vView=-mv.z; gl_Position=projectionMatrix*mv; }`,
+            fragmentShader: `
+                uniform float uTime, uDay, uFogNear, uFogFar; uniform vec3 uDeep, uShallow, uSky, uFogColor;
+                varying float vDepth; varying vec3 vW; varying float vView;
+                void main(){
+                    vec2 p = vW.xz;
+                    float r = sin(p.x*1.3+uTime*1.1)*sin(p.y*1.7-uTime*0.9) + sin((p.x*0.7-p.y*1.1)+uTime*0.6) ;
+                    float flow = sin((p.x+p.y)*0.55 - uTime*0.8 + sin(p.y*0.8)*1.5);
+                    float d = smoothstep(0.0, 0.85, vDepth);
+                    vec3 col = mix(uShallow, uDeep, d);
+                    col += (r*0.035 + flow*0.02);
+                    vec3 V = normalize(cameraPosition - vW);
+                    float fres = pow(1.0 - clamp(V.y, 0.0, 1.0), 3.0);
+                    col = mix(col, uSky, fres*0.55);
+                    float sp = pow(max(0.0, r*0.5+0.5), 40.0) * 0.18;
+                    col += sp * uDay;
+                    col *= mix(0.2, 1.0, uDay);
+                    float edge = smoothstep(0.0, 0.14, vDepth);
+                    float a = mix(0.28, 0.93, smoothstep(0.0, 0.5, vDepth)) * (0.55+0.45*edge);
+                    float f = smoothstep(uFogNear, uFogFar, vView);
+                    col = mix(col, uFogColor, f);
+                    gl_FragColor = vec4(col, a);
+                    #include <encodings_fragment>
+                }`
+        });
+        this.water = new THREE.Mesh(geo, this.waterMat);
+        this.water.renderOrder = 2;
+        this.scene.add(this.water);
     }
 
+    makeGrassTexture() {
+        const cv = Util.canvas(256, 256);
+        if (!cv) return null;
+        const { ctx, canvas } = cv;
+        ctx.fillStyle = '#e4e4e4'; ctx.fillRect(0, 0, 256, 256);
+        const wrap = (fn) => { for (const ox of [-256, 0, 256]) for (const oy of [-256, 0, 256]) fn(ox, oy); };
+        // 大塊明暗斑
+        for (let i = 0; i < 70; i++) {
+            const x = Math.random() * 256, y = Math.random() * 256, r = 14 + Math.random() * 34, l = 205 + Math.random() * 50;
+            wrap((ox, oy) => { const g = ctx.createRadialGradient(x + ox, y + oy, 0, x + ox, y + oy, r); g.addColorStop(0, `rgba(${l},${l},${l},0.5)`); g.addColorStop(1, 'rgba(255,255,255,0)'); ctx.fillStyle = g; ctx.fillRect(x + ox - r, y + oy - r, r * 2, r * 2); });
+        }
+        // 草葉短筆觸
+        for (let i = 0; i < 2600; i++) {
+            const x = Math.random() * 256, y = Math.random() * 256, l = 170 + Math.random() * 85;
+            ctx.strokeStyle = `rgba(${l},${l},${l},0.55)`; ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + (Math.random() - 0.5) * 3, y - 2 - Math.random() * 4); ctx.stroke();
+        }
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.encoding = THREE.sRGBEncoding;
+        tex.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy ? this.renderer.capabilities.getMaxAnisotropy() : 1);
+        return tex;
+    }
+
+    // ---------- 遊戲系統 ----------
     setupGameSystems() {
-        // 初始化遊戲系統
-        this.grid = new Grid(200); // 改為200x200網格
+        this.grid = new Grid(200);
+        this.grid.setTerrain(this.terrain, 97, 97);
         this.buildingManager = new BuildingManager(this.grid, this.scene);
+        this.wallPlanner = new WallPlanner(this);
         this.villagerManager = new VillagerManager(this.grid, this.scene, this.buildingManager);
-        this.treeManager = new TreeManager(this.grid, this.scene); // 移除樹木數量參數，改為自動計算
-        
-        // 設置建築管理器的樹木管理器引用
+        this.treeManager = new TreeManager(this.grid, this.scene);
+        this.treeManager.fx = this.fx;
         this.buildingManager.setTreeManager(this.treeManager);
     }
 
     setupInitialBuildings() {
-        // 在世界中心建造第一個城堡（適應200x200網格）
-        const centerX = 100;
-        const centerY = 100;
-        
-        // 清除城堡建造位置的樹木（較小範圍，只清理建築本身需要的空間）
-        this.treeManager.clearTreesInArea(centerX, centerY, 8);
-        
-        const result = this.buildingManager.buildCastle(centerX - 3, centerY - 3);
-        if (result.success) {
-            // 立即設置第一棟城堡
-            this.villagerManager.firstCastle = result.building;
-            this.villagerManager.firstCastleBeingBuilt = true;
-            
-            // 立即確保城堡周圍有足夠的樹木資源
-            this.ensureTreesAroundCastle(centerX, centerY);
-            
-            // 生成初始村民（增加到5個，確保有足夠的工人建造城堡）
-            const castlePos = result.building.getWorldPosition();
-            for (let i = 0; i < 5; i++) {
-                const villagerX = castlePos.x + (Math.random() - 0.5) * 10;
-                const villagerZ = castlePos.z + (Math.random() - 0.5) * 10;
-                this.villagerManager.createVillager(villagerX, villagerZ);
-            }
-            
-            // 在村民創建後立即啟動第一棟城堡建造模式
-            this.villagerManager.startFirstCastleConstruction();
-        } else {
-            // 如果失敗，逐步擴大清理範圍並重試
-            for (let clearRadius = 15; clearRadius <= 50; clearRadius += 10) {
-                this.treeManager.clearTreesInArea(centerX, centerY, clearRadius);
-                
-                const retryResult = this.buildingManager.buildCastle(centerX - 3, centerY - 3);
-                if (retryResult.success) {
-                    // 立即設置第一棟城堡
-                    this.villagerManager.firstCastle = retryResult.building;
-                    this.villagerManager.firstCastleBeingBuilt = true;
-                    
-                    this.ensureTreesAroundCastle(centerX, centerY);
-                    
-                    // 生成初始村民（增加到5個，確保有足夠的工人建造城堡）
-                    const castlePos = retryResult.building.getWorldPosition();
-                    for (let i = 0; i < 5; i++) {
-                        const villagerX = castlePos.x + (Math.random() - 0.5) * 10;
-                        const villagerZ = castlePos.z + (Math.random() - 0.5) * 10;
-                        this.villagerManager.createVillager(villagerX, villagerZ);
-                    }
-                    
-                    // 在村民創建後立即啟動第一棟城堡建造模式
-                    this.villagerManager.startFirstCastleConstruction();
-                    
-                    return; // 成功後退出
-                }
-            }
+        const cx = 100, cy = 100;
+        this.treeManager.clearTreesInArea(cx, cy, 9);
+        let result = this.buildingManager.buildCastle(cx - 3, cy - 3);
+        for (let r = 15; !result.success && r <= 50; r += 10) {
+            this.treeManager.clearTreesInArea(cx, cy, r);
+            result = this.buildingManager.buildCastle(cx - 3, cy - 3);
+        }
+        if (!result.success) return;
+        this.villagerManager.firstCastle = result.building;
+        this.villagerManager.firstCastleBeingBuilt = true;
+        this.ensureTreesAroundCastle(cx, cy);
+        const p = result.building.getWorldPosition();
+        for (let i = 0; i < 5; i++) {
+            this.villagerManager.createVillager(Math.floor(p.x + 3 + (Math.random() - 0.5) * 10), Math.floor(p.z + 3 + (Math.random() - 0.5) * 10));
+        }
+        this.villagerManager.startFirstCastleConstruction();
+        this.cityCenter.set(0, 0, 0);
+    }
+
+    // 確保城堡周圍 15–45 格內有足夠的樹木（初期木材來源）
+    ensureTreesAroundCastle(cx, cy) {
+        let count = 0;
+        for (let x = cx - 45; x <= cx + 45; x++) for (let y = cy - 45; y <= cy + 45; y++) {
+            const d = Math.hypot(x - cx, y - cy);
+            if (d >= 14 && d <= 45 && this.treeManager.byCell.has(`${x},${y}`)) count++;
+        }
+        let need = 140 - count, tries = 0;
+        while (need > 0 && tries++ < 4000) {
+            const a = Math.random() * 6.283, r = 14 + Math.random() * 30;
+            const px = Math.floor(cx + Math.cos(a) * r), py = Math.floor(cy + Math.sin(a) * r);
+            if (this.treeManager.addTreeAt(px, py)) need--;
         }
     }
 
-    // 確保城堡周圍有足夠的樹木資源
-    ensureTreesAroundCastle(centerX, centerY) {
-        const minRadius = 15; // 內圈半徑，避免太靠近城堡
-        const maxRadius = 60; // 外圈半徑，擴大搜索範圍
-        const targetTreeCount = 80; // 增加目標樹木數量，確保有足夠資源
-        
-        // 計算現有樹木數量
-        let currentTreeCount = 0;
-        for (let x = centerX - maxRadius; x <= centerX + maxRadius; x++) {
-            for (let y = centerY - maxRadius; y <= centerY + maxRadius; y++) {
-                const distance = Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2);
-                if (distance >= minRadius && distance <= maxRadius) {
-                    if (this.grid.isValidPosition(x, y) && this.treeManager.hasTreeAt(x, y)) {
-                        currentTreeCount++;
-                    }
-                }
-            }
-        }
-        
-        // 如果樹木不足，按聚集方式補充樹木
-        if (currentTreeCount < targetTreeCount) {
-            const treesToAdd = targetTreeCount - currentTreeCount;
-            let addedTrees = 0;
-            
-            // 生成3-5個聚集點
-            const numClusters = Math.min(5, Math.max(3, Math.ceil(treesToAdd / 15)));
-            const treesPerCluster = Math.ceil(treesToAdd / numClusters);
-            
-            for (let cluster = 0; cluster < numClusters && addedTrees < treesToAdd; cluster++) {
-                // 為每個聚集點選擇位置（避開城堡中心）
-                let clusterCenterX, clusterCenterY;
-                let attempts = 0;
-                
-                do {
-                    const angle = (cluster / numClusters) * Math.PI * 2 + Math.random() * 0.5; // 均勻分佈 + 隨機偏移
-                    const radius = minRadius + Math.random() * (maxRadius - minRadius);
-                    clusterCenterX = Math.floor(centerX + Math.cos(angle) * radius);
-                    clusterCenterY = Math.floor(centerY + Math.sin(angle) * radius);
-                    attempts++;
-                } while ((!this.grid.isValidPosition(clusterCenterX, clusterCenterY) || 
-                         this.grid.isOccupied(clusterCenterX, clusterCenterY)) && attempts < 10);
-                
-                if (attempts >= 10) continue; // 跳過無法找到合適位置的聚集點
-                
-                // 在聚集點周圍生成樹木
-                let clusterTrees = 0;
-                let clusterAttempts = 0;
-                const maxClusterAttempts = treesPerCluster * 3;
-                
-                while (clusterTrees < treesPerCluster && 
-                       clusterAttempts < maxClusterAttempts && 
-                       addedTrees < treesToAdd) {
-                    
-                    // 使用較小的聚集半徑，讓樹木更密集
-                    const clusterRadius = 3 + Math.random() * 8; // 3-11格的聚集半徑
-                    const clusterAngle = Math.random() * Math.PI * 2;
-                    
-                    const x = Math.floor(clusterCenterX + Math.cos(clusterAngle) * clusterRadius);
-                    const y = Math.floor(clusterCenterY + Math.sin(clusterAngle) * clusterRadius);
-                    
-                    // 確保在指定範圍內
-                    const distanceFromCastle = Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2);
-                    if (distanceFromCastle >= minRadius && distanceFromCastle <= maxRadius) {
-                        if (this.grid.isValidPosition(x, y) && 
-                            !this.grid.isOccupied(x, y) && 
-                            !this.treeManager.hasTreeAt(x, y)) {
-                            
-                            if (this.treeManager.addTreeAt(x, y)) {
-                                clusterTrees++;
-                                addedTrees++;
-                            }
-                        }
-                    }
-                    clusterAttempts++;
-                }
-                
-            }
-        }
+    // ---------- 時間 ----------
+    currentHour() {
+        const mode = Config.get('timeMode');
+        if (mode === 'day') return 12.5;
+        if (mode === 'sunset') return 18.4;
+        if (mode === 'night') return 23.2;
+        return this.gameHour;
     }
 
-    // 更新世界
-    update(currentTime) {
-        if (this.isPaused) return;
-        
-        const deltaTime = currentTime - this.lastUpdateTime;
-        const adjustedDeltaTime = deltaTime * this.gameSpeed;
-        
-        // 更新光影系統
-        this.updateLighting(currentTime);
-        
-        // 計算是否為夜晚
-        const gameHour = this.lightingSystem.timeOfDay * 24;
-        const isNight = gameHour < 5 || gameHour > 19;
-        
-        // 設定全局遊戲時間供村民系統使用
-        window.gameTime = {
-            currentHour: gameHour,
-            timeOfDay: this.lightingSystem.timeOfDay,
-            isNight: isNight
-        };
-        
-        // 更新相機
-        this.cameraController.update();
-        
-        // 計算調整後的時間（考慮遊戲速度）
-        const adjustedCurrentTime = currentTime * this.gameSpeed;
-        
-        // 更新遊戲系統
-        this.buildingManager.update(adjustedCurrentTime, isNight);
-        this.villagerManager.update(adjustedCurrentTime, this.treeManager, isNight, this.gameSpeed);
-        this.treeManager.update();
-        
-        // AI建造策略
-        this.updateAIBuilder(adjustedCurrentTime);
-        
-        // 檢查村民生產
-        this.handleVillagerSpawning(adjustedCurrentTime);
-        
-        this.lastUpdateTime = currentTime;
+    updateTime(simDtMs) {
+        const dayMs = Math.max(20, Config.get('dayLength')) * 1000;
+        this.simTime += simDtMs;
+        window.simTimeMs = this.simTime;
+        this.dayProgress = (this.startHour / 24 + this.simTime / dayMs);
+        this.gameHour = (this.dayProgress % 1) * 24;
+        this.dayNumber = Math.floor(this.dayProgress - this.startHour / 24) + 1;
+        const h = this.gameHour;
+        const isNight = h >= 20 || h < 4.5;
+        window.gameTime = { currentHour: h, timeOfDay: h / 24, isNight, day: this.dayNumber };
+        return isNight;
     }
 
-    // 處理村民生產
-    handleVillagerSpawning(currentTime) {
-        const maxPopulation = this.buildingManager.getTotalPopulationSupport();
-        const currentPopulation = this.villagerManager.getVillagerCount();
-        
-        if (currentPopulation >= maxPopulation) {
-            return; // 人口已滿
+    // ---------- 主更新（nowMs：時間戳記）----------
+    update(nowMs) {
+        if (this.lastNow === null) this.lastNow = nowMs;
+        let dtMs = Math.min(100, Math.max(0, nowMs - this.lastNow));
+        this.lastNow = nowMs;
+        this.step(dtMs);
+    }
+
+    step(dtMs) {
+        const dt = dtMs / 1000;
+        if (!this.isPaused) {
+            const simDt = dtMs * this.gameSpeed;
+            const isNight = this.updateTime(simDt);
+            this.scanCity();
+            const S = this.sky.update(dt * this.gameSpeed, this.currentHour(), this.cityCenter, this.camera.position);
+            this.skyState = S;
+            BM.setNight(S.night);
+            if (this.waterMat) { const u = this.waterMat.uniforms; u.uTime.value += dt; u.uDay.value = S.day; u.uFogColor.value.copy(S.fogColor); u.uSky.value.copy(S.fogColor); }
+            this.cameraController.update(dt, this.cityCenter, this.cityExtent);
+
+            this.buildingManager.update(this.simTime, isNight);
+            this.villagerManager.update(this.simTime, this.treeManager, isNight, 1);
+            this.treeManager.update(dt * this.gameSpeed, this.simTime);
+            this.updateAIBuilder(this.simTime, isNight);
+            if (this.wallPlanner) this.wallPlanner.update(this.simTime, isNight);
+            this.updateKeeps(this.simTime, isNight);
+            this.updateMill(this.simTime, isNight);
+            this.handleVillagerSpawning(this.simTime);
+
+            const vdt = dt * Math.min(this.gameSpeed, 3);
+            this.buildingManager.animate(vdt, S, this.fx);
+            this.villagerManager.animate(vdt, this.simTime);
+            this.fx.update(dt, S.night, S.light, this.cityCenter);
+            this.pathWear.update(dt);
         }
-        
-        // 簡化村民生產：每10秒自動生產一個村民（不消耗食物）
-        // 但只有建造完成的城堡才能生產村民
+        this.hudTimer += dt;
+        if (this.hudTimer > 0.25) { this.hudTimer = 0; this.updateHud(); }
+    }
+
+    // 估算城市中心與範圍（供相機與陰影使用）
+    scanCity() {
+        if (this.simTime - this.lastCityScan < 2000) return;
+        this.lastCityScan = this.simTime;
+        let sx = 0, sz = 0, wsum = 0;
+        const list = [];
+        for (const b of this.buildingManager.buildings.values()) {
+            if (b.type === 'farm' || !b.group) continue;
+            const c = b.getCenterWorld();
+            if (b.isWall) { if (b.type === 'walltower') list.push(c); continue; }
+            const w = b.type === 'castle' ? 3 : 1;
+            sx += c.x * w; sz += c.z * w; wsum += w; list.push(c);
+        }
+        if (!wsum) return;
+        const cx = sx / wsum, cz = sz / wsum;
+        let ext = 8;
+        for (const c of list) ext = Math.max(ext, Math.hypot(c.x - cx, c.z - cz) + 6);
+        this.cityCenter.set(cx, 0, cz);
+        this.cityExtent = ext;
+        const half = Util.clamp(40 + ext * 1.25, 55, 120);
+        if (Math.abs(half - this.sky.shadowHalf) > 6) this.sky.setShadowExtent(half);
+    }
+
+    // ---------- 村民生產 ----------
+    handleVillagerSpawning(now) {
+        if (now - this.lastSpawnCheck < 500) return;
+        this.lastSpawnCheck = now;
+        const maxPop = this.buildingManager.getTotalPopulationSupport();
+        if (this.villagerManager.getVillagerCount() >= maxPop) return;
         this.buildingManager.castles.forEach(castle => {
-            // 檢查城堡是否建造完成
-            if (!castle.isComplete) {
-                return; // 城堡還在建造中，無法生產村民
-            }
-            
-            if (currentTime - castle.lastVillagerSpawn >= 10000) { // 10秒間隔
-                castle.lastVillagerSpawn = currentTime;
-                
-                // 在城堡附近生成村民
-                const castleWorldPos = castle.getWorldPosition();
-                const spawnPos = this.findSpawnPositionNearCastle(castleWorldPos);
-                
-                if (spawnPos) {
-                    this.villagerManager.createVillager(spawnPos.x, spawnPos.z);
-                    // 已建造完成的城堡生產了新村民
+            if (!castle.isComplete) return;
+            if (now - castle.lastVillagerSpawn >= castle.villagerSpawnInterval) {
+                castle.lastVillagerSpawn = now;
+                const sp = this.findSpawnPositionNearCastle(castle);
+                if (sp) {
+                    const v = this.villagerManager.createVillager(sp.x, sp.z);
+                    if (this.fx && v) this.fx.sparkle(sp.x + 0.5, 0.8, sp.z + 0.5);
                 }
             }
         });
     }
 
-    // 在城堡附近找到生成位置
-    findSpawnPositionNearCastle(castlePos) {
-        for (let radius = 2; radius <= 8; radius++) {
-            for (let angle = 0; angle < Math.PI * 2; angle += Math.PI / 4) {
-                const x = castlePos.x + Math.cos(angle) * radius;
-                const z = castlePos.z + Math.sin(angle) * radius;
-                
-                // 檢查位置是否可用
-                const gridPos = this.grid.worldToGrid(x, z);
-                if (this.grid.isValidPosition(gridPos.x, gridPos.y) && 
-                    !this.grid.isOccupied(gridPos.x, gridPos.y)) {
-                    return { x, z };
-                }
+    findSpawnPositionNearCastle(castle) {
+        // 從城門前方開始找空位
+        const c = castle.getCenterWorld();
+        for (let r = 4; r <= 9; r++) {
+            for (let a = 0; a < 8; a++) {
+                const ang = castle.facing + Math.PI / 2 * 0 + a * Math.PI / 4;
+                const x = Math.floor(c.x + Math.sin(ang) * r), z = Math.floor(c.z + Math.cos(ang) * r);
+                const g = this.grid.worldToGrid(x, z);
+                if (this.grid.isValidPosition(g.x, g.y) && !this.grid.buildings.has(`${g.x},${g.y}`)) return { x, z };
             }
         }
         return null;
     }
 
-    // 渲染世界
-    render() {
-        this.renderer.render(this.scene, this.camera);
+    // ---------- 城區分級 ----------
+    // 到最近（已完工）城堡中心的距離（格）；之後地形可在此加入「路徑距離」
+    districtDist(gx, gy) {
+        let best = Infinity;
+        for (const c of this.buildingManager.castles) {
+            if (!c.isComplete) continue;
+            const d = Math.hypot(c.x + 3 - gx, c.y + 3 - gy);
+            if (d < best) best = d;
+        }
+        return best;
+    }
+    // 0 茅草 / 1 木構 / 2 石造：取「城市成熟度」與「離城堡距離」兩者較低者
+    districtTier(gx, gy) {
+        const pop = this.villagerManager ? this.villagerManager.getVillagerCount() : 0;
+        const maturity = pop < 14 ? 0 : (pop < 34 ? 1 : 2);
+        const d = this.districtDist(gx, gy);
+        const byDist = d < 17 ? 2 : (d < 32 ? 1 : 0);
+        return Math.min(maturity, byDist);
     }
 
-    // 嘗試建造建築
-    tryBuildBuilding(type, worldX, worldZ) {
-        const gridPos = this.grid.worldToGrid(worldX, worldZ);
-        let result;
-        let cost;
-
-        switch (type) {
-            case 'castle':
-                cost = 100;
-                if (!this.villagerManager.consumeWood(cost)) {
-                    return { success: false, message: '木材不足' };
-                }
-                result = this.buildingManager.buildCastle(gridPos.x - 3, gridPos.y - 3);
-                break;
-
-            case 'tower':
-                cost = 10;
-                if (!this.villagerManager.consumeWood(cost)) {
-                    return { success: false, message: '木材不足' };
-                }
-                result = this.buildingManager.buildTower(gridPos.x - 1, gridPos.y - 1);
-                break;
-
-            case 'house':
-                cost = 10;
-                if (!this.villagerManager.consumeWood(cost)) {
-                    return { success: false, message: '木材不足' };
-                }
-                result = this.buildingManager.buildHouse(gridPos.x - 2, gridPos.y - 2);
-                break;
-
-            case 'farm':
-                cost = 3;
-                if (!this.villagerManager.consumeWood(cost)) {
-                    return { success: false, message: '木材不足' };
-                }
-                result = this.buildingManager.buildFarm(gridPos.x - 3, gridPos.y - 3);
-                break;
-
-            default:
-                return { success: false, message: '未知的建築類型' };
+    _millSpacing(x, y) {
+        for (const fp of this.grid.footprints.values()) {
+            const m = fp.type.indexOf('wall') === 0 ? 1 : 3;
+            if (fp.x - m < x + 5 && fp.x + fp.w + m > x && fp.y - m < y + 5 && fp.y + fp.h + m > y) {
+                if (!fp.cells) return false;
+                for (const c of fp.cells) if (c.x - m < x + 5 && c.x + 1 + m > x && c.y - m < y + 5 && c.y + 1 + m > y) return false;
+            }
         }
-
-        if (!result.success) {
-            // 建造失敗，退還木材
-            this.villagerManager.woodInventory += cost;
-        } else if (type === 'farm') {
-            // 農田建造成功，重新分配村民
-            this.villagerManager.reassignVillagersToFarms();
-        }
-
-        return result;
+        return true;
     }
 
-    // 獲取遊戲狀態
+    // 河邊水車磨坊：人口夠了、有河、木材夠就蓋在離城堡最近的河岸，水車朝向河面
+    updateMill(now, isNight) {
+        if (isNight || now - (this._millT || 0) < 4000) return;
+        this._millT = now;
+        const bm = this.buildingManager, vm = this.villagerManager, g = this.grid;
+        if (!g.terr) return;
+        const pop = vm.getVillagerCount();
+        const want = pop >= 140 ? 2 : (pop >= 40 ? 1 : 0);
+
+        if (bm.mills.length >= want || bm.mills.some(m => m.isUnderConstruction) || vm.getWoodInventory() < 90) return;
+        const castles = bm.castles.filter(c => c.isComplete);
+        if (!castles.length) return;
+        const ref = castles[0], rx = ref.x + 3, ry = ref.y + 3, S = g.size;
+        let best = null, bd = 1e9;
+        for (let y = Math.max(0, ry - 52); y < Math.min(S, ry + 52); y++) for (let x = Math.max(0, rx - 52); x < Math.min(S, rx + 52); x++) {
+            if (!g.terr.water[y * S + x]) continue;
+            for (let k = 0; k < 16; k++) for (const off of [3.8, 4.6, 5.4]) {
+                const a = k * Math.PI / 8, dx = Math.cos(a), dy = Math.sin(a);
+                const gx = Math.round(x - dx * off - 2), gy = Math.round(y - dy * off - 2);
+                const d = Math.hypot(gx + 2.5 - rx, gy + 2.5 - ry);
+                if (d < 12 || d > 52 || d >= bd) continue;
+                if (!g.canBuildIgnoreTrees(gx, gy, 5, 5, true)) continue; if (!this._millSpacing(gx, gy)) continue;
+                bd = d; best = { x: gx, y: gy, facing: Math.atan2(-dy, dx) };
+            }
+        }
+        if (!best) { this._millT = now + 30000; return; }
+        const r = bm.buildMill(best.x, best.y, best.facing);
+        if (r.success) vm.consumeWood(90);
+    }
+
+    // 城堡等級：隨人口成熟度升高（越成熟越高聳）
+    castleLevel() {
+        const pop = this.villagerManager ? this.villagerManager.getVillagerCount() : 0;
+        return pop < 30 ? 0 : (pop < 70 ? 1 : 2);
+    }
+
+    updateKeeps(now, isNight) {
+        if (!this.keeps) this.keeps = new Map();
+        for (const c of this.buildingManager.castles) {
+            if (!this.keeps.has(c.id)) this.keeps.set(c.id, new WallPlanner(this, { keepOf: c }));
+        }
+        for (const k of this.keeps.values()) k.update(now, isNight);
+    }
+
+    // ---------- AI 建造策略 ----------
+    updateAIBuilder(now, isNight) {
+        if (isNight) return;
+        if (now - this.aiBuilder.lastBuildAttempt < this.aiBuilder.buildInterval) return;
+        this.aiBuilder.lastBuildAttempt = now;
+        const bm = this.buildingManager, vm = this.villagerManager;
+        if (!bm.castles.some(c => c.isComplete)) return;
+
+        const wood = vm.getWoodInventory(), pop = vm.getVillagerCount(), cap = bm.getTotalPopulationSupport();
+        const counts = bm.getBuildingCounts();
+        let sites = 0;
+        for (const b of bm.buildings.values()) if (b.isUnderConstruction && !b.isWall) sites++;
+        if (sites >= Math.min(5, 1 + Math.floor(pop / 10))) return;
+
+        const farmsDesired = Math.min(12, 2 + Math.floor(pop / 8));
+        const wantHouse = pop >= cap - 2 && cap < 200;
+        const wantTower = counts.towers < Math.floor(counts.houses / 3);
+        const wantCastle = counts.castles < Math.min(6, 1 + Math.floor(counts.houses / 10)) && cap < 200;
+
+        if (counts.farms < Math.min(2, farmsDesired) && wood >= 3 && this.aiBuildFarm()) return;
+        if (wantHouse && wood >= 10 && this.aiBuildHouse()) return;
+        if (wantCastle) { if (wood >= 100) { if (this.aiBuildCastle()) return; } else return; }
+        if (wantTower && wood >= 10 && this.aiBuildTower()) return;
+        if (counts.farms < farmsDesired && wood >= 3 && this.aiBuildFarm()) return;
+    }
+
+    aiBuildCastle() { return this._aiBuild(6, 'castle', 100); }
+    aiBuildTower() { return this._aiBuild(2, 'tower', 10); }
+    aiBuildHouse() { return this._aiBuild(4, 'house', 10); }
+    aiBuildFarm() {
+        const ok = this._aiBuild(6, 'farm', 3);
+        if (ok) this.villagerManager.reassignVillagersToFarms();
+        return ok;
+    }
+
+    _aiBuild(size, kind, cost) {
+        const pos = this.findBuildPosition(size, kind);
+        if (!pos) { if (kind !== 'farm' && this.wallPlanner) this.wallPlanner.requestExpand(); return false; }
+        const bm = this.buildingManager;
+        const r = kind === 'castle' ? bm.buildCastle(pos.x, pos.y) : kind === 'tower' ? bm.buildTower(pos.x, pos.y) :
+            kind === 'house' ? bm.buildHouse(pos.x, pos.y) : bm.buildFarm(pos.x, pos.y);
+        if (r.success) {
+            this.villagerManager.consumeWood(cost);
+            if (kind === 'castle' && this.wallPlanner) this.wallPlanner.requestExpand();
+            return true;
+        }
+        return false;
+    }
+
+    _wallOk(kind, x, y, size) {
+        const wp = this.wallPlanner;
+        if (!wp || !wp.hasWall()) return true;
+        if (kind === 'castle') return !wp.next;      // 新城堡可蓋在牆外（之後由擴建的城牆包進來）；施工中的新牆範圍已定，先等它完工
+        return kind === 'farm' ? wp.outsideForFarm(x, y, size) : wp.inside(x, y, size);
+    }
+
+    // 在某座城堡周圍由內而外找建造位置
+    findBuildPosition(size, kind) {
+        const castles = this.buildingManager.castles.filter(c => c.isComplete);
+        if (!castles.length) return null;
+        const counts = this.buildingManager.getBuildingCounts();
+        let ref;
+        if (kind === 'castle') ref = castles[castles.length - 1];
+        else ref = Math.random() < 0.6 ? castles[castles.length - 1] : castles[Math.floor(Math.random() * castles.length)];
+        const c = { x: ref.x + 3, y: ref.y + 3 };
+        let minR = 8, maxR = 48;
+        if (kind === 'castle') { minR = 15; maxR = 55; }
+        else if (kind === 'tower') { minR = 9; }
+        else if (kind === 'farm') { minR = counts.houses < 2 ? 8 : Math.min(30, 11 + Math.floor(counts.houses * 0.5)); maxR = 46; }
+        const g = this.grid, isFarm = kind === 'farm';
+        const wp = this.wallPlanner, cr = wp && wp.constraint();
+        if (cr) {
+            // 有城牆：蓋在牆內（農田在牆外），搜尋範圍隨牆放大
+            const half = 55;
+            if (kind === 'farm') { minR = 6; maxR = half + 30; } else maxR = Math.max(maxR, half + 4);
+            if (kind !== 'farm') minR = Math.min(minR, 8);
+        }
+        for (let r = minR; r <= maxR; r++) {
+            const steps = Math.max(36, Math.round(r * 2.4));
+            const start = Math.random() * Math.PI * 2;
+            for (let i = 0; i < steps; i++) {
+                const a = start + i * Math.PI * 2 / steps;
+                const x = Math.floor(c.x + Math.cos(a) * r - size / 2 + 0.5), y = Math.floor(c.y + Math.sin(a) * r - size / 2 + 0.5);
+                if (x < 2 || y < 2 || x >= g.size - size - 2 || y >= g.size - size - 2) continue;
+                if (g.canBuildIgnoreTrees(x, y, size, size) && g.checkBuildingCondition(x, y, size, size) && g.checkBuildingSpacing(x, y, size, size, isFarm) && this._wallOk(kind, x, y, size) && (kind !== 'castle' || !g.hasBuildingNear(x, y, size, size, 9))) return { x, y };
+            }
+        }
+        return null;
+    }
+
+    // ---------- 設定 ----------
+    applyAllConfig() {
+        for (const k of Object.keys(Config.values)) this.onConfig(k, Config.values[k]);
+    }
+
+    onConfig(key, value) {
+        switch (key) {
+            case 'gameSpeed': this.gameSpeed = Util.clamp(value, 0.1, 8); break;
+            case 'fogEnabled':
+                if (this.scene.fog) { this.scene.fog.near = value ? 90 : 1e5; this.scene.fog.far = value ? 380 : 2e5; }
+                break;
+            case 'autoPlay': this.isPaused = !value; value ? this.cameraController.resume() : this.cameraController.pause(); break;
+            case 'shadowQuality': this.sky.setShadowQuality(value); if (this.treeManager) this.treeManager.setShadows(value > 0); break;
+            case 'renderScale': this.applyPixelRatio(); this.handleResize(); break;
+            case 'treeDensity': if (this.treeManager) this.treeManager.setTargetTreeCount(Math.round(this.treeManager.totalTrees * Util.clamp(value, 0.2, 1.6))); break;
+            case 'clouds': this.sky.setCloudsVisible(value); break;
+            case 'particles': this.fx.setEnabled(value); break;
+            case 'cameraFov': this.fx.setViewport(window.innerHeight * this.renderer.getPixelRatio(), value); break;
+            case 'showHud': { const el = document.getElementById('hud'); if (el) el.style.display = value ? 'block' : 'none'; break; }
+        }
+    }
+
+    updateHud() {
+        if (!Config.get('showHud')) return;
+        const el = document.getElementById('hud');
+        if (!el) return;
+        const h = this.gameHour, hh = Math.floor(h), mm = Math.floor((h - hh) * 60);
+        const b = this.buildingManager.getBuildingCounts();
+        const icon = h >= 5.5 && h < 19 ? '☀' : '☾';
+        el.innerHTML = `<div class="t">${icon} 第 ${this.dayNumber} 天 · ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}</div>` +
+            `<div>居民 ${this.villagerManager.getVillagerCount()} / ${this.buildingManager.getTotalPopulationSupport()}</div>` +
+            `<div>木材 ${this.villagerManager.getWoodInventory()}</div>` +
+            `<div>城堡 ${b.castles} · 塔 ${b.towers} · 房 ${b.houses} · 田 ${b.farms}</div>`;
+    }
+
+    // ---------- 其他 ----------
+    render() { this.renderer.render(this.scene, this.camera); }
+
+    handleResize() {
+        this.camera.aspect = window.innerWidth / window.innerHeight;
+        this.camera.updateProjectionMatrix();
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+        if (this.fx) this.fx.setViewport(window.innerHeight * this.renderer.getPixelRatio(), this.camera.fov);
+    }
+
     getGameState() {
-        // 計算遊戲內時間
-        const hours = Math.floor(this.lightingSystem.timeOfDay * 24);
-        const minutes = Math.floor((this.lightingSystem.timeOfDay * 24 - hours) * 60);
-        const timeString = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
-        
+        const h = this.gameHour || 0, hh = Math.floor(h), mm = Math.floor((h - hh) * 60);
         return {
             woodInventory: this.villagerManager.getWoodInventory(),
             population: this.villagerManager.getVillagerCount(),
             villagers: this.villagerManager.getVillagerCount(),
             farmWorkers: this.villagerManager.getFarmWorkerCount(),
-            timeOfDay: timeString,
-            buildings: {
-                castles: this.buildingManager.castles.length,
-                towers: this.buildingManager.towers.length,
-                houses: this.buildingManager.houses.length,
-                farms: this.buildingManager.farms.length
-            },
-            trees: {
-                active: this.treeManager.getActiveTreeCount(),
-                destroyed: this.treeManager.getDestroyedTreeCount()
-            },
-            isPaused: this.isPaused,
-            gameSpeed: this.gameSpeed
+            timeOfDay: `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`,
+            day: this.dayNumber,
+            buildings: { castles: this.buildingManager.castles.length, towers: this.buildingManager.towers.length, houses: this.buildingManager.houses.length, farms: this.buildingManager.farms.length },
+            trees: { active: this.treeManager.getActiveTreeCount(), destroyed: this.treeManager.getDestroyedTreeCount() },
+            isPaused: this.isPaused, gameSpeed: this.gameSpeed
         };
     }
 
-    // 暫停/恢復遊戲
-    togglePause() {
-        this.isPaused = !this.isPaused;
-        
-        if (this.isPaused) {
-            this.cameraController.pause();
-        } else {
-            this.cameraController.resume();
-        }
-        
-        return this.isPaused;
+    togglePause() { this.isPaused = !this.isPaused; this.isPaused ? this.cameraController.pause() : this.cameraController.resume(); return this.isPaused; }
+    setGameSpeed(s) { this.gameSpeed = Util.clamp(s, 0.1, 8); return this.gameSpeed; }
+
+    // 快轉（除錯/截圖用）：不渲染，僅推進模擬
+    fastForward(simSeconds) {
+        const steps = Math.floor(simSeconds * 1000 / 50);
+        const saved = this.gameSpeed; this.gameSpeed = 1;
+        for (let i = 0; i < steps; i++) this.step(50);
+        this.gameSpeed = saved;
     }
 
-    // 調整遊戲速度
-    setGameSpeed(speed) {
-        this.gameSpeed = Math.max(0.1, Math.min(5, speed));
-        return this.gameSpeed;
-    }
-    
-    // 調試函數：檢查村民狀態
-    debugVillagers() {
-        if (this.villagerManager) {
-            this.villagerManager.debugPrintAllVillagers();
-            
-            // 同時檢查建築狀態
-            this.villagerManager.debugPrintAllBuildings();
-            
-            // 強制檢查村民可見性
-            const isNight = this.lightingSystem.timeOfDay > 0.75 || this.lightingSystem.timeOfDay < 0.25;
-            this.villagerManager.checkVillagerVisibility(isNight);
-        } else {
-            console.log('村民管理器尚未初始化');
-        }
-    }
-    
-    // 強制修復停滯的建築
-    forceFixBuildings() {
-        if (this.villagerManager) {
-            return this.villagerManager.forceFixStuckBuildings();
-        } else {
-            console.log('村民管理器尚未初始化');
-            return 0;
-        }
-    }
-
-    // 調試工具：創建村民位置標記
-    debugCreateMarkers() {
-        if (this.villagerManager) {
-            return this.villagerManager.debugCreateVillagerMarkers();
-        } else {
-            console.log('村民管理器尚未初始化');
-            return 0;
-        }
-    }
-
-    // 調試工具：移除村民標記
-    debugRemoveMarkers() {
-        if (this.villagerManager) {
-            return this.villagerManager.debugRemoveVillagerMarkers();
-        } else {
-            console.log('村民管理器尚未初始化');
-        }
-    }
-
-    // 修復村民材質問題
-    debugFixMaterials() {
-        if (this.villagerManager) {
-            return this.villagerManager.debugFixVillagerMaterials();
-        } else {
-            console.log('村民管理器尚未初始化');
-            return 0;
-        }
-    }
-
-    // 重新創建問題村民
-    debugRecreateVillagers() {
-        if (this.villagerManager) {
-            return this.villagerManager.debugRecreateVillagers();
-        } else {
-            console.log('村民管理器尚未初始化');
-            return 0;
-        }
-    }
-
-    // 調試工具：清理超界建築和修復被困村民
-    debugCleanupOutOfBounds() {
-        if (this.villagerManager) {
-            return this.villagerManager.debugCleanupOutOfBoundsBuildings();
-        } else {
-            console.log('村民管理器尚未初始化');
-            return { removedBuildings: 0, rescuedWorkers: 0 };
-        }
-    }
-
-    // 調試工具：強制修復所有問題
-    debugFixAll() {
-        console.log('=== 執行全面修復 ===');
-        
-        if (!this.villagerManager) {
-            console.log('村民管理器尚未初始化');
-            return;
-        }
-        
-        // 1. 清理超界建築
-        const cleanupResult = this.villagerManager.debugCleanupOutOfBoundsBuildings();
-        
-        // 2. 修復建築狀態
-        this.villagerManager.fixBrokenBuildings();
-        
-        // 3. 修復村民材質
-        const materialsFixed = this.villagerManager.debugFixVillagerMaterials();
-        
-        // 4. 重新創建問題村民
-        const villagersRecreated = this.villagerManager.debugRecreateVillagers();
-        
-        // 5. 強制修復停滯建築
-        const stuckBuildingsFixed = this.villagerManager.forceFixStuckBuildings();
-        
-        // 6. 修復卡住的砍樹村民
-        const stuckTreeVillagersFixed = this.villagerManager.debugFixStuckTreeVillagers();
-        
-        // 7. 重新檢查可見性
-        this.villagerManager.checkVillagerVisibility(false);
-        
-        console.log('=== 全面修復完成 ===');
-        console.log(`清理建築: ${cleanupResult.removedBuildings}, 拯救工人: ${cleanupResult.rescuedWorkers}`);
-        console.log(`修復材質: ${materialsFixed}, 重建村民: ${villagersRecreated}, 修復停滯建築工人: ${stuckBuildingsFixed}`);
-        console.log(`修復卡住砍樹村民: ${stuckTreeVillagersFixed}`);
-        
-        return {
-            cleanupResult,
-            materialsFixed,
-            villagersRecreated,
-            stuckBuildingsFixed,
-            stuckTreeVillagersFixed
-        };
-    }
-
-    // 調試工具：修復卡住的砍樹村民
-    debugFixStuckTreeVillagers() {
-        if (this.villagerManager) {
-            return this.villagerManager.debugFixStuckTreeVillagers();
-        } else {
-            console.log('村民管理器尚未初始化');
-            return 0;
-        }
-    }
-
-    // 處理窗口大小變化
-    handleResize() {
-        this.camera.aspect = window.innerWidth / window.innerHeight;
-        this.camera.updateProjectionMatrix();
-        this.renderer.setSize(window.innerWidth, window.innerHeight);
-    }
-
-    // 銷毀世界
     destroy() {
-        // 銷毀所有遊戲對象
-        if (this.treeManager) {
-            this.treeManager.destroyAll();
-        }
-        
-        if (this.villagerManager) {
-            for (const villager of this.villagerManager.getAllVillagers()) {
-                villager.destroy();
-            }
-        }
-        
-        if (this.buildingManager) {
-            for (const building of this.buildingManager.getAllBuildings()) {
-                building.destroy();
-            }
-        }
-        
-        // 清理場景
-        if (this.scene) {
-            while (this.scene.children.length > 0) {
-                this.scene.remove(this.scene.children[0]);
-            }
-        }
-        
-        // 清理渲染器
-        if (this.renderer) {
-            this.renderer.dispose();
-        }
-    }
-    
-    // AI建造策略更新
-    updateAIBuilder(currentTime) {
-        // 檢查是否為夜晚時間（18:00後），如果是則禁止AI建造
-        if (this.isNightTime()) {
-            return;
-        }
-        
-        // 檢查是否到了建造時間
-        if (currentTime - this.aiBuilder.lastBuildAttempt < this.aiBuilder.buildInterval) {
-            return;
-        }
-        
-        this.aiBuilder.lastBuildAttempt = currentTime;
-        
-        // 獲取當前資源和建築數量
-        const wood = this.villagerManager.getWoodInventory();
-        const currentBuildings = this.buildingManager.getBuildingCounts();
-        const limits = this.buildingManager.getBuildingLimits();
-        
-        // 建造優先級策略：城堡 > 塔樓 > 房舍 > 農田
-        // 但如果高優先級建築被上限阻擋，就先建低級建築解鎖上限
-        let buildSuccess = false;
-        
-        // 1. 優先檢查城堡：未達上限就等100木材建造城堡
-        if (currentBuildings.castles < limits.castle) {
-            if (wood >= 100) {
-                buildSuccess = this.aiBuildCastle();
-            } else {
-                return; // 等待更多木材，不建造其他建築
-            }
-        } 
-        // 2. 城堡已達上限，檢查塔樓：未達上限就等10木材建造塔樓
-        else if (currentBuildings.towers < limits.tower) {
-            if (wood >= 10) {
-                buildSuccess = this.aiBuildTower();
-            } else {
-                return; // 等待更多木材，不建造其他建築
-            }
-        }
-        // 3. 塔樓被上限阻擋，檢查房舍：未達上限就等10木材建造房舍來解鎖塔樓
-        else if (currentBuildings.houses < limits.house) {
-            if (wood >= 10) {
-                buildSuccess = this.aiBuildHouse();
-            } else {
-                return; // 等待更多木材，不建造其他建築
-            }
-        } 
-        // 4. 房舍也被上限阻擋，建造農田來解鎖房舍（3木材）
-        else if (wood >= 3) {
-            buildSuccess = this.aiBuildFarm();
-        } 
-        else {
-            return; // 木材不足，等待更多資源
-        }
-        
-        // 如果建造失敗，調整建造間隔避免過於頻繁的嘗試
-        if (!buildSuccess && (wood >= 5)) {
-            this.aiBuilder.buildInterval = Math.min(5000, this.aiBuilder.buildInterval * 1.2); // 逐漸增加間隔
-        } else if (buildSuccess) {
-            this.aiBuilder.buildInterval = 1000; // 建造成功後重置間隔
-        }
-    }
-
-    // AI建造城堡
-    aiBuildCastle() {
-        const castles = this.buildingManager.castles;
-        let buildPos = null;
-        
-        if (castles.length === 0) {
-            // 第一個城堡在中心
-            buildPos = { x: 97, y: 97 }; // 200x200網格的中心附近
-        } else {
-            // 找到距離現有城堡較遠的位置
-            buildPos = this.findBuildPositionNearCastle(6, false); // 城堡6x6，不是農田
-        }
-        
-        if (buildPos) {
-            const result = this.buildingManager.buildCastle(buildPos.x, buildPos.y);
-            if (result.success) {
-                this.villagerManager.consumeWood(100);
-                return true;
-            } else {
-                return false;
-            }
-        } else {
-            return false;
-        }
-    }
-
-    // AI建造塔樓
-    aiBuildTower() {
-        const buildPos = this.findBuildPositionNearCastle(2, false); // 塔樓2x2，不是農田
-        
-        if (buildPos) {
-            const result = this.buildingManager.buildTower(buildPos.x, buildPos.y);
-            if (result.success) {
-                this.villagerManager.consumeWood(10);
-                return true;
-            } else {
-                return false;
-            }
-        } else {
-            return false;
-        }
-    }
-
-    // AI建造房舍
-    aiBuildHouse() {
-        const buildPos = this.findBuildPositionNearCastle(4, false); // 房舍4x4，不是農田
-        
-        if (buildPos) {
-            const result = this.buildingManager.buildHouse(buildPos.x, buildPos.y);
-            if (result.success) {
-                this.villagerManager.consumeWood(10);
-                return true;
-            } else {
-                return false;
-            }
-        } else {
-            return false;
-        }
-    }
-
-    // AI建造農田
-    aiBuildFarm() {
-        const buildPos = this.findBuildPositionNearCastle(6, true); // 農田6x6，是農田
-        
-        if (buildPos) {
-            const result = this.buildingManager.buildFarm(buildPos.x, buildPos.y);
-            if (result.success) {
-                this.villagerManager.consumeWood(3);
-                
-                // 重新分配村民到新建造的農田
-                this.villagerManager.reassignVillagersToFarms();
-                
-                // 更新地形顏色以顯示農田
-                setTimeout(() => {
-                    this.updateFarmColors();
-                }, 100);
-                
-                return true;
-            } else {
-                return false;
-            }
-        } else {
-            return false;
-        }
-    }
-
-    // 找到靠近城堡的建造位置
-    findBuildPositionNearCastle(buildingSize = 1, isFarm = false, customMaxRadius = null) {
-        const castles = this.buildingManager.castles;
-        if (castles.length === 0) return null;
-        
-        // 選擇最新的城堡作為參考點
-        const referenceCastle = castles[castles.length - 1];
-        const castlePos = { x: referenceCastle.x + 3, y: referenceCastle.y + 3 }; // 城堡中心
-        
-        // 在城堡周圍螺旋搜索合適的建造位置
-        // 對於非農田建築，需要更大的搜索範圍以滿足間距要求
-        const maxRadius = customMaxRadius || (isFarm ? 30 : 60); // 增加非農田建築的搜索範圍
-        const minRadius = isFarm ? 8 : 12; // 非農田建築從更遠處開始搜索
-        
-        // 先嘗試較近的位置，再嘗試較遠的位置
-        for (let radius = minRadius; radius <= maxRadius; radius += 1) {
-            // 在每個半徑上嘗試多個角度
-            const angleStep = Math.PI / 24; // 更細的角度步進，15度一步
-            const numAngles = Math.floor(2 * Math.PI / angleStep);
-            
-            // 隨機化角度起始點，避免總是從同一方向開始
-            const startAngle = Math.random() * angleStep;
-            
-            for (let i = 0; i < numAngles; i++) {
-                const angle = startAngle + i * angleStep;
-                const x = Math.floor(castlePos.x + Math.cos(angle) * radius);
-                const y = Math.floor(castlePos.y + Math.sin(angle) * radius);
-                
-                // 檢查位置是否在網格範圍內
-                if (x >= 0 && y >= 0 && x < this.grid.size - buildingSize && y < this.grid.size - buildingSize) {
-                    // 檢查指定大小的建築位置
-                    const canBuild = this.grid.canBuild(x, y, buildingSize, buildingSize);
-                    const hasNearbyBuilding = this.grid.checkBuildingCondition(x, y, buildingSize, buildingSize);
-                    const hasProperSpacing = this.grid.checkBuildingSpacing(x, y, buildingSize, buildingSize, isFarm);
-                    
-                    if (canBuild && hasNearbyBuilding && hasProperSpacing) {
-                        return { x, y };
-                    }
-                }
-            }
-        }
-        
-        // 如果找不到位置，嘗試在更大的範圍內搜索（僅限農田）
-        if (isFarm && !customMaxRadius && maxRadius < 50) {
-            return this.findBuildPositionNearCastle(buildingSize, isFarm, 50);
-        }
-        
-        return null;
+        if (this.treeManager) this.treeManager.destroyAll();
+        if (this.renderer) this.renderer.dispose();
     }
 }

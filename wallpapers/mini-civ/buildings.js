@@ -1,3 +1,47 @@
+// 建築 —— 低多邊形模型（合併幾何 + 頂點色）、分段建造動畫、窗戶夜間發光
+const BM = {
+    _inst: null,
+    time: { value: 0 },
+    get() {
+        if (this._inst) return this._inst;
+        const solid = new THREE.MeshLambertMaterial({ vertexColors: true });
+        // 夜間窗戶：共用一個材質，全部建築同步發光
+        const win = new THREE.MeshLambertMaterial({ color: 0x1d2b3d, emissive: 0x000000, side: THREE.DoubleSide });
+        const cloth = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
+        cloth.onBeforeCompile = (shader) => {
+            shader.uniforms.uTime = BM.time;
+            shader.vertexShader = 'uniform float uTime;\n' + shader.vertexShader.replace('#include <begin_vertex>',
+                `#include <begin_vertex>
+                 float amp = clamp(position.x * 1.6, 0.0, 1.0);
+                 transformed.z += sin(uTime * 4.2 + position.x * 5.5) * 0.12 * amp;
+                 transformed.y += sin(uTime * 3.1 + position.x * 4.0) * 0.04 * amp;`);
+        };
+        cloth.customProgramCacheKey = () => 'bmCloth';
+        // 夜間地面光暈
+        let glowTex = null;
+        const cv = Util.canvas(128, 128);
+        if (cv) {
+            const g = cv.ctx.createRadialGradient(64, 64, 2, 64, 64, 64);
+            g.addColorStop(0, 'rgba(255,200,110,1)'); g.addColorStop(0.35, 'rgba(255,170,80,0.45)'); g.addColorStop(1, 'rgba(255,150,60,0)');
+            cv.ctx.fillStyle = g; cv.ctx.fillRect(0, 0, 128, 128);
+            glowTex = new THREE.CanvasTexture(cv.canvas);
+        }
+        const glow = new THREE.MeshBasicMaterial({ map: glowTex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0, fog: false });
+        const skirt = new THREE.MeshLambertMaterial({ color: Util.color(0x8c877b) });
+        this._inst = { solid, win, cloth, glow, skirt, glowGeo: new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2) };
+        return this._inst;
+    },
+    // 夜晚程度 0..1
+    setNight(night) {
+        const m = this.get();
+        m.win.emissive.setRGB(1.0, 0.62, 0.22).multiplyScalar(Util.smoothstep(0.15, 0.85, night) * 1.15);
+        m.win.color.setRGB(0.1, 0.16, 0.24).lerp(new THREE.Color(1, 0.8, 0.45), Util.smoothstep(0.2, 0.9, night) * 0.8);
+        m.glow.opacity = Util.smoothstep(0.2, 0.9, night) * 0.5;
+    }
+};
+
+function easeOutBack(t) { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); }
+
 // 建築基礎類別
 class Building {
     constructor(x, y, grid, scene) {
@@ -7,180 +51,219 @@ class Building {
         this.scene = scene;
         this.mesh = null;
         this.id = this.generateId();
-        
-        // 建造進度系統
+
         this.isUnderConstruction = true;
-        this.buildingParts = []; // 存儲建築的各個部分
-        this.currentBuildStep = 0; // 當前建造步驟
-        this.totalBuildSteps = 0; // 總建造步驟數
+        this.buildingParts = [];
+        this.partAnchors = [];
+        this.currentBuildStep = 0;
+        this.totalBuildSteps = 0;
         this.lastBuildTime = 0;
-        this.buildStepInterval = 1000; // 每1000毫秒（1秒）建造一個部分
-        this.isComplete = false; // 建築是否完成
-        
-        // 建造工人系統
-        this.constructionWorkers = []; // 正在建造此建築的村民
-        this.requiredWorkers = 1; // 需要的最少工人數（預設1個）
-        this.maxWorkers = 3; // 最大工人數（預設3個）
-        
-        // 建築建構函式，設定基本屬性
+        this.buildStepInterval = 1000;
+        this.isComplete = false;
+        this.facing = 0;
+        this.createdAt = simNow();
+        this.lastProgress = simNow();
+
+        this.constructionWorkers = [];
+        this.requiredWorkers = 1;
+        this.maxWorkers = 3;
+
+        this.popping = [];
+        this.windows = null;
+        this.glowSize = 0;
+        this.smokeEmitters = [];
     }
 
-    generateId() {
-        return `${this.constructor.name.toLowerCase()}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    generateId() { return `${this.constructor.name.toLowerCase()}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`; }
+
+    // 足跡中心（世界座標）
+    getCenterWorld() {
+        const w = this.grid.gridToWorld(this.x, this.y);
+        return { x: w.x + this.width / 2, z: w.z + this.height / 2 };
     }
 
-    // 抽象方法，子類別必須實現
-    create() {
-        throw new Error('create() method must be implemented');
+    create() { throw new Error('create() method must be implemented'); }
+    createBuildingParts() { throw new Error('createBuildingParts() method must be implemented'); }
+
+    // ---- 視覺：零件 ----
+    // geoms: 幾何陣列；baseY: 零件底部高度（動畫以此為軸心）；anchor: 工人站位（本地座標）
+    addPart(geoms, baseY, anchor, opts) {
+        opts = opts || {};
+        const geo = Geo.merge(Array.isArray(geoms) ? geoms : [geoms]);
+        geo.translate(0, -baseY, 0);
+        const mesh = new THREE.Mesh(geo, opts.material || BM.get().solid);
+        mesh.position.y = baseY;
+        mesh.castShadow = opts.cast !== false;
+        mesh.receiveShadow = opts.receive !== false;
+        mesh.visible = false;
+        this.group.add(mesh);
+        this.buildingParts.push(mesh);
+        this.partAnchors.push(anchor || { x: 0, z: 0 });
+        return mesh;
     }
 
-    // 創建建築部分但不立即顯示
-    createBuildingParts() {
-        throw new Error('createBuildingParts() method must be implemented');
+    // 建立施工現場（夯土地基 + 木樁 + 木料堆）
+    createSite() {
+        const g = new THREE.Group();
+        const sz = this.siteSize ? this.siteSize() : { w: this.width - 0.4, h: this.height - 0.4 };
+        const w = sz.w, h = sz.h;
+        const parts = [Geo.box(w, 0.08, h, 0x8a7352, { y: 0.04, jitter: 0.03 })];
+        const post = (x, z) => parts.push(Geo.box(0.12, 0.9, 0.12, 0x6a4a2c, { x, z, y: 0.45 }));
+        post(-w / 2, -h / 2); post(w / 2, -h / 2); post(-w / 2, h / 2); post(w / 2, h / 2);
+        // 圍繩（細長橫桿）
+        parts.push(Geo.box(w, 0.05, 0.05, 0xcdbb94, { y: 0.8, z: -h / 2 }));
+        parts.push(Geo.box(w, 0.05, 0.05, 0xcdbb94, { y: 0.8, z: h / 2 }));
+        parts.push(Geo.box(0.05, 0.05, h, 0xcdbb94, { y: 0.8, x: -w / 2 }));
+        parts.push(Geo.box(0.05, 0.05, h, 0xcdbb94, { y: 0.8, x: w / 2 }));
+        // 木料堆
+        for (let i = 0; i < 4; i++) parts.push(Geo.cyl(0.12, 0.12, 1.1, 6, 0xa57a48, { x: w / 2 - 0.6 + (i % 2) * 0.28, y: 0.14 + Math.floor(i / 2) * 0.22, z: h / 2 - 0.7, rz: Math.PI / 2 }));
+        const mesh = new THREE.Mesh(Geo.merge(parts), BM.get().solid);
+        mesh.castShadow = true; mesh.receiveShadow = true;
+        g.add(mesh);
+        this.site = g;
+        this.group.add(g);
     }
 
-    // 更新建造進度
+    // ---- 建造進度 ----
     updateConstruction(currentTime) {
         if (!this.isUnderConstruction || this.isComplete) return;
+        if (!this.checkWorkerAtCurrentPart()) return;
 
-        // 檢查當前建造步驟是否有村民在位
-        const hasWorker = this.checkWorkerAtCurrentPart();
-        
-        if (!hasWorker) {
-            // 沒有村民在當前建造部件位置，暫停建造
-            return;
-        }
-
-        // 如果這是第一個部件（currentBuildStep === 0），立即完成建造
         if (this.currentBuildStep === 0) {
-            // 第一個部件立即完成建造
             this.completeBuildingCurrentPart();
             this.lastBuildTime = currentTime;
             return;
         }
-
-        // 如果這是第一次調用非第一部件，立即開始建造當前部分
         if (this.currentBuildStep < this.totalBuildSteps && this.lastBuildTime === 0) {
-            this.startBuildingCurrentPart();
             this.lastBuildTime = currentTime;
             return;
         }
-
-        // 檢查是否該完成當前部分的建造
         if (currentTime - this.lastBuildTime >= this.buildStepInterval) {
             this.completeBuildingCurrentPart();
             this.lastBuildTime = currentTime;
         }
     }
 
-    // 檢查當前建造部件是否有村民在位
     checkWorkerAtCurrentPart() {
         if (this.currentBuildStep >= this.totalBuildSteps) return false;
-        
-        const currentPartPosition = this.getPartBuildPosition(this.currentBuildStep);
-        if (!currentPartPosition) {
-            return false;
-        }
-
-        
-        // 檢查是否有村民在該位置附近
-        const nearbyWorkers = this.constructionWorkers.filter(worker => {
-            const workerGridPos = this.grid.worldToGrid(worker.x, worker.z);
-            const distance = Math.abs(workerGridPos.x - currentPartPosition.x) + 
-                           Math.abs(workerGridPos.y - currentPartPosition.y);
-            return distance <= 2; // 允許2格範圍內
+        const pos = this.getPartBuildPosition(this.currentBuildStep);
+        if (!pos) return false;
+        return this.constructionWorkers.some(worker => {
+            const g = this.grid.worldToGrid(worker.x, worker.z);
+            return Math.max(Math.abs(g.x - pos.x), Math.abs(g.y - pos.y)) <= 2;
         });
-
-        return nearbyWorkers.length > 0;
     }
 
-    // 開始建造當前部分（顯示建造效果）
-    startBuildingCurrentPart() {
-        // 開始建造下一個建築部分
-        // 可以在這裡添加建造視覺效果
-    }
+    startBuildingCurrentPart() {}
 
-    // 完成當前部分的建造
     completeBuildingCurrentPart() {
-        // 嘗試完成建築部分
-        
-        // 顯示當前建造步驟的部分
         const part = this.buildingParts[this.currentBuildStep];
-        if (part && part.visible !== undefined) {
+        if (part) {
             part.visible = true;
+            // 彈出動畫：以底部為軸心向上長出來
+            part.scale.set(0.9, 0.02, 0.9);
+            part.userData.pop = 0;
+            this.popping.push(part);
+            const fx = window.worldInstance && window.worldInstance.fx;
+            if (fx) {
+                const a = this.partAnchors[this.currentBuildStep] || { x: 0, z: 0 };
+                const v = new THREE.Vector3(a.x, 0.2, a.z);
+                this.group.localToWorld(v);
+                fx.dust(v.x, 0.1, v.z, 7);
+            }
         }
-
-        // 完成建造當前部分
-        
         this.currentBuildStep++;
-        
-        // 更新建築進度
-        
-        // 檢查是否已完成所有步驟
+        this.lastProgress = simNow();
+
         if (this.currentBuildStep >= this.totalBuildSteps) {
-            // 建造完成
-            // 建築建造完成！設置完成狀態
             this.isUnderConstruction = false;
             this.isComplete = true;
             this.onConstructionComplete();
             return;
         }
-
-        // 如果還有更多部件要建造，指派村民到下一個位置
         this.assignWorkersToCurrentPart();
     }
 
-    // 獲取特定建造部件的建造位置（需要在子類中重寫）
+    // 建造部件的工人站位：足跡外圍一圈（工人站在牆外敲打）
     getPartBuildPosition(partIndex) {
-        // 預設返回建築中心位置
-        return {
-            x: this.x + Math.floor(this.width / 2),
-            y: this.y + Math.floor(this.height / 2),
-            z: 0 // 地面高度
-        };
+        const a = this.partAnchors[partIndex] || { x: 0, z: 0 };
+        const cx = this.x + this.width / 2, cy = this.y + this.height / 2;
+        const c = Math.cos(this.facing), s = Math.sin(this.facing);
+        let dx = a.x * c + a.z * s, dz = -a.x * s + a.z * c;
+        const hw = this.width / 2 + 0.8, hh = this.height / 2 + 0.8;
+        if (Math.abs(dx) < hw && Math.abs(dz) < hh) {
+            const px = hw - Math.abs(dx), pz = hh - Math.abs(dz);
+            if (px < pz) dx = (dx >= 0 ? 1 : -1) * hw; else dz = (dz >= 0 ? 1 : -1) * hh;
+        }
+        const gx = Util.clamp(Math.floor(cx + dx), Math.max(0, this.x - 1), Math.min(this.grid.size - 1, this.x + this.width));
+        const gy = Util.clamp(Math.floor(cy + dz), Math.max(0, this.y - 1), Math.min(this.grid.size - 1, this.y + this.height));
+        return { x: gx, y: gy, z: 0 };
     }
 
-    // 指派工人到當前建造部件位置
     assignWorkersToCurrentPart() {
         if (this.currentBuildStep >= this.totalBuildSteps) return;
-        
         const buildPosition = this.getPartBuildPosition(this.currentBuildStep);
-        if (!buildPosition) {
-            return;
-        }
-
-        
-        // 重新指派所有建造工人到當前建造步驟位置
+        if (!buildPosition) return;
         for (const worker of this.constructionWorkers) {
             if (worker.state === 'constructing') {
                 worker.assignedToPart = this.currentBuildStep;
                 worker.targetBuildPosition = buildPosition;
-                
-                // 讓工人移動到建造位置
                 worker.createPath(buildPosition.x, buildPosition.y);
             }
         }
     }
 
-    // 建造完成時的回調
     onConstructionComplete() {
-        // 釋放所有建造工人
         this.releaseAllWorkers();
-        // 可以在子類中重寫此方法
-        // 建築完成通知
+        if (this.site) this.site.visible = false;
+        this.buildWindows();
+        this.addGlowDecal();
+        const fx = window.worldInstance && window.worldInstance.fx;
+        if (fx) {
+            const c = this.getCenterWorld();
+            fx.sparkle(c.x, 2.0, c.z);
+            fx.dust(c.x, 0.1, c.z, 14);
+        }
+    }
+
+    // ---- 窗戶與夜間光暈 ----
+    buildWindows() {
+        const quads = this.windowQuads ? this.windowQuads() : [];
+        if (!quads.length) return;
+        const parts = quads.map(q => Geo.quad(q.w, q.h, q.x, q.y, q.z, q.ry));
+        const m = new THREE.Mesh(Geo.merge(parts), BM.get().win);
+        m.receiveShadow = false; m.castShadow = false;
+        this.group.add(m);
+        this.windows = m;
+    }
+
+    addGlowDecal() {
+        if (!this.glowSize) return;
+        const m = new THREE.Mesh(BM.get().glowGeo, BM.get().glow);
+        m.scale.set(this.glowSize, 1, this.glowSize);
+        m.position.set(0, 0.09, 0.4);
+        m.renderOrder = 5;
+        this.group.add(m);
+        this.glowMesh = m;
+    }
+
+    // 逐幀動畫（秒）
+    animate(dt) {
+        for (let i = this.popping.length - 1; i >= 0; i--) {
+            const p = this.popping[i];
+            p.userData.pop += dt / 0.55;
+            const t = Math.min(1, p.userData.pop);
+            const e = easeOutBack(t);
+            p.scale.set(0.9 + 0.1 * t, Math.max(0.02, e), 0.9 + 0.1 * t);
+            if (t >= 1) { p.scale.set(1, 1, 1); this.popping.splice(i, 1); }
+        }
     }
 
     // 建造工人管理
     addWorker(villager) {
         if (this.constructionWorkers.length < this.maxWorkers && !this.constructionWorkers.includes(villager)) {
             this.constructionWorkers.push(villager);
-            // 工人開始協助建造
-            
-            // 立即指派工人到當前建造部件位置
-            setTimeout(() => {
-                this.assignWorkersToCurrentPart();
-            }, 100); // 短延遲確保狀態更新完成
-            
+            setTimeout(() => { this.assignWorkersToCurrentPart(); }, 100);
             return true;
         }
         return false;
@@ -188,1348 +271,894 @@ class Building {
 
     removeWorker(villager) {
         const index = this.constructionWorkers.indexOf(villager);
-        if (index !== -1) {
-            this.constructionWorkers.splice(index, 1);
-            // 工人停止協助建造
-            return true;
-        }
+        if (index !== -1) { this.constructionWorkers.splice(index, 1); return true; }
         return false;
     }
 
     releaseAllWorkers() {
-        // 通知所有工人建造完成，他們可以回到其他工作
-        const workersToRelease = [...this.constructionWorkers]; // 創建副本以避免在遍歷時修改陣列
-        
+        const workersToRelease = [...this.constructionWorkers];
         for (const worker of workersToRelease) {
             if (worker.state === 'constructing') {
                 worker.state = 'idle';
                 worker.constructionBuilding = null;
-                // 清除所有建造相關的屬性
                 worker.workPosition = null;
                 worker.assignedToPart = null;
                 worker.targetBuildPosition = null;
                 worker.target = null;
                 worker.path = [];
-                // 工人建造完成，返回閒置狀態
             }
         }
-        
-        // 清空工人列表
         this.constructionWorkers = [];
-        // 所有工人已釋放，準備重新分配工作
     }
 
-    needsMoreWorkers() {
-        const needs = this.isUnderConstruction && this.constructionWorkers.length < this.requiredWorkers;
-        return needs;
-    }
-
-    canAcceptMoreWorkers() {
-        return this.isUnderConstruction && this.constructionWorkers.length < this.maxWorkers;
-    }
+    needsMoreWorkers() { return this.isUnderConstruction && this.constructionWorkers.length < this.requiredWorkers; }
+    canAcceptMoreWorkers() { return this.isUnderConstruction && this.constructionWorkers.length < this.maxWorkers; }
 
     getWorkerPositions() {
-        // 返回建築周圍的工作位置
         const positions = [];
-        const baseX = this.x + Math.floor(this.width / 2);
-        const baseY = this.y + Math.floor(this.height / 2);
-        
-        // 在建築周圍生成工作位置
+        const baseX = this.x + Math.floor(this.width / 2), baseY = this.y + Math.floor(this.height / 2);
         for (let i = 0; i < this.maxWorkers; i++) {
             const angle = (i / this.maxWorkers) * Math.PI * 2;
             const radius = Math.max(this.width, this.height) / 2 + 2;
-            const x = baseX + Math.cos(angle) * radius;
-            const y = baseY + Math.sin(angle) * radius;
-            positions.push({ x: Math.round(x), y: Math.round(y) });
+            positions.push({ x: Math.round(baseX + Math.cos(angle) * radius), y: Math.round(baseY + Math.sin(angle) * radius) });
         }
-        
         return positions;
     }
 
     destroy() {
-        if (this.mesh) {
-            this.scene.remove(this.mesh);
-            this.mesh = null;
+        if (this.group) {
+            this.scene.remove(this.group);
+            this.group.traverse(o => { if (o.geometry && o.geometry !== BM.get().glowGeo) o.geometry.dispose(); });
+            this.group = null;
         }
+        this.mesh = null;
         this.buildingParts = [];
     }
 
-    getWorldPosition() {
-        return this.grid.gridToWorld(this.x, this.y);
+    getWorldPosition() { return this.grid.gridToWorld(this.x, this.y); }
+
+    // 村民躲進建築時的可見性判斷：點是否在足跡內
+    containsWorld(wx, wz, margin) {
+        const w = this.grid.gridToWorld(this.x, this.y);
+        const m = margin || 0;
+        return wx >= w.x - m && wx <= w.x + this.width + m && wz >= w.z - m && wz <= w.z + this.height + m;
+    }
+
+    // 建築基準高度：足跡中心與四角的平均地面高度
+    groundLevel(c) {
+        const hw = this.width / 2, hh = this.height / 2;
+        return (groundY(c.x, c.z) + groundY(c.x - hw, c.z - hh) + groundY(c.x + hw, c.z - hh) + groundY(c.x - hw, c.z + hh) + groundY(c.x + hw, c.z + hh)) / 5;
+    }
+
+    makeGroup() {
+        const g = new THREE.Group();
+        const c = this.getCenterWorld();
+        g.position.set(c.x, this.groundLevel(c), c.z);
+        g.rotation.y = this.facing;
+        this.group = g;
+        this.mesh = g;
+        this.scene.add(g);
+        // 地基裙：坡地上把落差遮住（平地時埋在地面下看不到）
+        if (!this.isWall) {
+            const sk = new THREE.Mesh(new THREE.BoxGeometry(this.width - 0.15, 2.4, this.height - 0.15), BM.get().skirt);
+            sk.position.y = -1.2 + 0.02; sk.receiveShadow = true;
+            g.add(sk);
+        }
+        return g;
     }
 }
 
-// 城堡類別
+// ---------- 城堡 ----------
 class Castle extends Building {
     constructor(x, y, grid, scene) {
         super(x, y, grid, scene);
         this.width = 6;
         this.height = 6;
         this.lastVillagerSpawn = 0;
-        this.villagerSpawnInterval = 10000; // 10秒
-        this.populationSupport = 5; // 支援5人口
-        this.type = 'castle'; // 添加建築類型
-        
-        // 城堡需要更多工人來建造
-        this.requiredWorkers = 2; // 需要至少2個工人
-        this.maxWorkers = 4; // 最大4個工人
-        
+        this.villagerSpawnInterval = 10000;
+        this.level = 0;
+        this.populationSupport = 5;
+        this.type = 'castle';
+        this.requiredWorkers = 2;
+        this.maxWorkers = 4;
+        this.glowSize = 13;
         this.create();
     }
 
     create() {
-        const group = new THREE.Group();
-        const worldPos = this.getWorldPosition();
-
-        // 創建建築部分但不顯示
-        this.createBuildingParts(group, worldPos);
-        
-        this.mesh = group;
-        this.scene.add(group);
-
-        // 在網格中標記佔用
+        this.facing = Math.floor(Math.random() * 4) * Math.PI / 2;
+        this.makeGroup();
+        this.createSite();
+        this.createBuildingParts();
         this.grid.occupyArea(this.x, this.y, this.width, this.height, this.id);
     }
 
-    createBuildingParts(group, worldPos) {
-        this.buildingParts = [];
+    // 城堡升級：加高角塔與主堡（level 0/1/2）
+    upgrade(level) {
+        if (!this.group || level === this.level) return;
+        for (const m of this.buildingParts) { this.group.remove(m); m.traverse && m.traverse(o => { if (o.geometry) o.geometry.dispose(); }); }
+        if (this.windows) { this.group.remove(this.windows); this.windows.geometry.dispose(); this.windows = null; }
+        this.popping = [];
+        this.level = level;
+        this.populationSupport = [5, 7, 9][level];
+        this.createBuildingParts();
+        this.currentBuildStep = this.totalBuildSteps;
+        for (const m of this.buildingParts) { m.visible = true; m.scale.set(0.92, 0.02, 0.92); m.userData.pop = -Math.random() * 0.4; this.popping.push(m); }
+        this.buildWindows();
+        const fx = window.worldInstance && window.worldInstance.fx;
+        if (fx) { const c = this.getCenterWorld(); fx.dust(c.x, 0.2, c.z, 22); fx.sparkle(c.x, 5, c.z); }
+    }
 
-        // 第1層：底部石頭色立方體 (6x6x2) - 基礎層
-        const baseGeometry = new THREE.BoxGeometry(6, 2, 6);
-        const baseMaterial = new THREE.MeshLambertMaterial({ color: 0xa6a6a6 });
-        const baseMesh = new THREE.Mesh(baseGeometry, baseMaterial);
-        baseMesh.position.set(worldPos.x, -1.95, worldPos.z); // 稍微抬高避免Z-fighting
-        baseMesh.castShadow = true;
-        baseMesh.receiveShadow = true;
-        baseMesh.visible = false;
-        group.add(baseMesh);
-        this.buildingParts.push(baseMesh);
+    createBuildingParts() {
+        const G = Geo, stone = 0xb8b2a4, stoneD = 0x9a9486, roof = 0xa63f31;
+        const Et = [0, 2.0, 3.6][this.level || 0], Ek = [0, 3.0, 6.2][this.level || 0];   // 角塔 / 主堡加高量
+        this.buildingParts = []; this.partAnchors = [];
 
-        // 第2層：中層石頭色立方體 (6x6x2) 
-        const midGeometry = new THREE.BoxGeometry(6, 2, 6);
-        const midMaterial = new THREE.MeshLambertMaterial({ color: 0xa6a6a6 });
-        const midMesh = new THREE.Mesh(midGeometry, midMaterial);
-        midMesh.position.set(worldPos.x, 0, worldPos.z);
-        midMesh.castShadow = true;
-        midMesh.receiveShadow = true;
-        midMesh.visible = false;
-        group.add(midMesh);
-        this.buildingParts.push(midMesh);
+        // 0 地基與庭院
+        this.addPart([G.box(6.0, 0.3, 6.0, 0x8f897d, { y: 0.15 }), G.box(5.0, 0.04, 5.0, 0x6f6a60, { y: 0.31 })], 0, { x: 0, z: 3.3 });
 
-        // 第3層：頂層石頭色立方體 (6x6x2)
-        const topGeometry = new THREE.BoxGeometry(6, 2, 6);
-        const topMaterial = new THREE.MeshLambertMaterial({ color: 0xa6a6a6 });
-        const topMesh = new THREE.Mesh(topGeometry, topMaterial);
-        topMesh.position.set(worldPos.x, 2, worldPos.z);
-        topMesh.castShadow = true;
-        topMesh.receiveShadow = true;
-        topMesh.visible = false;
-        group.add(topMesh);
-        this.buildingParts.push(topMesh);
-
-        // 第4層：四個角落的塔樓底部
-        const towerPositions = [
-            { x: worldPos.x - 2.5, z: worldPos.z - 2.5 },
-            { x: worldPos.x + 2.5, z: worldPos.z - 2.5 },
-            { x: worldPos.x - 2.5, z: worldPos.z + 2.5 },
-            { x: worldPos.x + 2.5, z: worldPos.z + 2.5 }
-        ];
-
-        towerPositions.forEach((pos, index) => {
-            // 塔樓底部
-            const towerBottomGeometry = new THREE.CylinderGeometry(0.4, 0.4, 3, 12);
-            const towerBottomMaterial = new THREE.MeshLambertMaterial({ color: 0xa6a6a6 });
-            const towerBottomMesh = new THREE.Mesh(towerBottomGeometry, towerBottomMaterial);
-            towerBottomMesh.position.set(pos.x, -0.5, pos.z);
-            towerBottomMesh.castShadow = true;
-            towerBottomMesh.receiveShadow = true;
-            towerBottomMesh.visible = false;
-            group.add(towerBottomMesh);
-            this.buildingParts.push(towerBottomMesh);
+        // 1 城牆（含垛口，正面留城門缺口）
+        {
+            const p = [];
+            const T = 0.6, H = 2.4, y = 0.3 + H / 2;
+            p.push(G.box(2.2, H, T, stone, { x: -1.9, y, z: 2.55 }), G.box(2.2, H, T, stone, { x: 1.9, y, z: 2.55 }));     // 前（門兩側）
+            p.push(G.box(4.4, H, T, stone, { y, z: -2.55 }));                                                           // 後
+            p.push(G.box(T, H, 4.4, stone, { x: -2.55, y }), G.box(T, H, 4.4, stone, { x: 2.55, y }));                  // 左右
+            // 垛口
+            const crenel = (x, z, ry) => p.push(G.box(0.42, 0.42, 0.66, stoneD, { x, z, y: 0.3 + H + 0.21, ry: ry || 0 }));
+            for (let i = -2; i <= 2; i++) crenel(i * 0.95, -2.55);
+            for (let i = -2; i <= 2; i++) crenel(-2.55, i * 0.95, Math.PI / 2);
+            for (let i = -2; i <= 2; i++) crenel(2.55, i * 0.95, Math.PI / 2);
+            crenel(-2.0, 2.55); crenel(-1.2, 2.55); crenel(2.0, 2.55); crenel(1.2, 2.55);
+            this.addPart(p, 0.3, { x: -2.0, z: 3.2 });
+        }
+        // 2 城門樓
+        {
+            const p = [G.box(2.0, 3.0, 0.9, stone, { y: 0.3 + 1.5, z: 2.55 })];
+            p.push(G.box(1.0, 1.5, 0.12, 0x3b2a1c, { y: 0.3 + 0.75, z: 3.03 }));
+            p.push(G.cyl(0.5, 0.5, 0.12, 12, 0x3b2a1c, { y: 0.3 + 1.5, z: 3.03, rx: Math.PI / 2 }));
+            for (let i = -1; i <= 1; i++) p.push(G.box(0.45, 0.4, 0.8, stoneD, { x: i * 0.7, y: 0.3 + 3.2, z: 2.55 }));
+            p.push(G.box(1.2, 0.1, 0.5, 0x6a4a2c, { y: 0.35, z: 3.35 })); // 踏階
+            this.addPart(p, 0.3, { x: 0, z: 3.3 });
+        }
+        // 3-6 四座角塔
+        const corners = [[-2.55, -2.55], [2.55, -2.55], [-2.55, 2.55], [2.55, 2.55]];
+        corners.forEach(([x, z]) => {
+            const p = [G.cyl(0.92, 1.02, 3.7 + Et, 12, stone, { x, z, y: 0.3 + (3.7 + Et) / 2 }), G.cyl(1.12, 1.0, 0.35, 12, stoneD, { x, z, y: 0.3 + 3.7 + Et + 0.17 })];
+            if (Et > 0) p.push(G.cyl(1.04, 1.04, 0.18, 12, stoneD, { x, z, y: 0.3 + (3.7 + Et) * 0.55 }));
+            this.addPart(p, 0.3, { x: x * 1.1, z: z * 1.1 });
         });
-
-        // 第5層：四個角落的塔樓頂部
-        towerPositions.forEach((pos, index) => {
-            // 塔樓頂部
-            const towerTopGeometry = new THREE.CylinderGeometry(0.4, 0.4, 3, 12);
-            const towerTopMaterial = new THREE.MeshLambertMaterial({ color: 0xa6a6a6 });
-            const towerTopMesh = new THREE.Mesh(towerTopGeometry, towerTopMaterial);
-            towerTopMesh.position.set(pos.x, 2.5, pos.z);
-            towerTopMesh.castShadow = true;
-            towerTopMesh.receiveShadow = true;
-            towerTopMesh.visible = false;
-            group.add(towerTopMesh);
-            this.buildingParts.push(towerTopMesh);
+        // 7-8 主堡
+        this.addPart([G.box(2.8, 2.6, 2.8, 0xc4bdae, { y: 0.3 + 1.3 }), G.box(3.0, 0.2, 3.0, stoneD, { y: 0.3 + 2.7 })], 0.3, { x: -2.2, z: 0 });
+        {
+            const p = [G.box(2.4, 1.6 + Ek, 2.4, 0xcbc4b5, { y: 3.2 + (1.6 + Ek) / 2 })];
+            for (let i = -1; i <= 1; i++) { p.push(G.box(0.5, 0.4, 0.5, stoneD, { x: i * 0.95, y: 4.8 + Ek + 0.2, z: 1.0 }), G.box(0.5, 0.4, 0.5, stoneD, { x: i * 0.95, y: 4.8 + Ek + 0.2, z: -1.0 })); }
+            if (Ek > 0) for (let k = 1; k <= (this.level === 2 ? 2 : 1); k++) p.push(G.box(2.55, 0.16, 2.55, stoneD, { y: 3.2 + k * (1.6 + Ek) / (this.level === 2 ? 3 : 2) }));
+            this.addPart(p, 3.2, { x: 2.2, z: 0 });
+        }
+        // 9-12 角塔屋頂
+        corners.forEach(([x, z]) => {
+            this.addPart([G.cone(1.3, 2.1, 12, roof, { x, z, y: 4.3 + Et + 1.05 })], 4.3 + Et, { x: x * 1.1, z: z * 1.1 });
         });
-
-        // 第6層：主屋頂
-        const roofShape = new THREE.Shape();
-        roofShape.moveTo(-3, 0);
-        roofShape.lineTo(3, 0);
-        roofShape.lineTo(0, 2.6);
-        roofShape.lineTo(-3, 0);
-        
-        const extrudeSettings = {
-            depth: 6,
-            bevelEnabled: false
-        };
-        
-        const roofGeometry = new THREE.ExtrudeGeometry(roofShape, extrudeSettings);
-        const roofMaterial = new THREE.MeshLambertMaterial({ color: 0xff0000 });
-        const roofMesh = new THREE.Mesh(roofGeometry, roofMaterial);
-        roofMesh.position.set(worldPos.x, 3.5, worldPos.z - 3);
-        roofMesh.castShadow = true;
-        roofMesh.receiveShadow = true;
-        roofMesh.visible = false;
-        group.add(roofMesh);
-        this.buildingParts.push(roofMesh);
-
-        // 第7層：塔樓屋頂
-        towerPositions.forEach((pos, index) => {
-            // 塔樓屋頂
-            const towerRoofGeometry = new THREE.ConeGeometry(0.6, 1.5, 12);
-            const towerRoofMaterial = new THREE.MeshLambertMaterial({ color: 0xff0000 });
-            const towerRoofMesh = new THREE.Mesh(towerRoofGeometry, towerRoofMaterial);
-            towerRoofMesh.position.set(pos.x, 4.75, pos.z);
-            towerRoofMesh.castShadow = true;
-            towerRoofMesh.visible = false;
-            group.add(towerRoofMesh);
-            this.buildingParts.push(towerRoofMesh);
-        });
-
+        // 13 主堡屋頂
+        this.addPart([G.pyramid(3.0, 2.2 + Ek * 0.25, 3.0, roof, { y: 4.8 + Ek + 1.1 + Ek * 0.125 }), G.cyl(0.07, 0.07, 1.5, 6, 0x4a3a2a, { y: 7.0 + Ek + Ek * 0.25 + 0.75 })], 4.8 + Ek, { x: 0, z: 2.8 });
+        // 14 旗幟
+        this.addFlags();
         this.totalBuildSteps = this.buildingParts.length;
-        this.lastBuildTime = 0; // 從0開始，讓建造系統立即啟動
-
-        // 稍後添加窗戶（建造完成後）
-        this.windowsCreated = false;
+        this.lastBuildTime = 0;
     }
 
-    onConstructionComplete() {
-        super.onConstructionComplete();
-        
-        // 建造完成後添加窗戶
-        if (!this.windowsCreated) {
-            this.createCastleWindows(this.mesh, this.getWorldPosition());
-            this.windowsCreated = true;
-        }
+    addFlags() {
+        // 旗幟（獨立材質，風吹飄動）：最後一個零件
+        const G = Geo, p = [], cloth = [];
+        const poleTop = (x, y, z, h, color, w) => {
+            p.push(G.cyl(0.045, 0.045, h, 5, 0x4a3a2a, { x, y: y + h / 2, z }));
+            cloth.push(G.part(new THREE.PlaneGeometry(w, w * 0.62, 6, 2), color, { x: x + w / 2 + 0.03, y: y + h - w * 0.35, z, jitter: 0 }));
+        };
+        const Et = [0, 2.0, 3.6][this.level || 0], Ek = [0, 3.0, 6.2][this.level || 0];
+        poleTop(0, 7.0 + Ek * 1.25, 0, 1.5, 0xd8452f, 1.15);
+        poleTop(-2.55, 5.4 + Et, 2.55, 1.2, 0xd8452f, 0.8);
+        poleTop(2.55, 5.4 + Et, 2.55, 1.2, 0xd8452f, 0.8);
+        // 旗杆用一般材質，旗面用布料材質 —— 合成一個零件（兩個 mesh 放進 Group）
+        const g = new THREE.Group();
+        const mp = new THREE.Mesh(Geo.merge(p), BM.get().solid); mp.castShadow = true;
+        const mc = new THREE.Mesh(Geo.merge(cloth), BM.get().cloth); mc.castShadow = true;
+        g.add(mp, mc);
+        g.visible = false;
+        this.group.add(g);
+        this.buildingParts.push(g);
+        this.partAnchors.push({ x: 0, z: 3.2 });
     }
 
-    // 創建城堡窗戶
-    createCastleWindows(group, worldPos) {
-        this.windows = [];
-        
-        // 四面牆的窗戶位置
-        const windowConfigs = [
-            // 前面 (Z-)
-            { x: -1.5, y: 2, z: -3.01, rotY: 0 },
-            { x: 1.5, y: 2, z: -3.01, rotY: 0 },
-            { x: 0, y: 3.5, z: -3.01, rotY: 0 },
-            // 後面 (Z+)
-            { x: -1.5, y: 2, z: 3.01, rotY: Math.PI },
-            { x: 1.5, y: 2, z: 3.01, rotY: Math.PI },
-            { x: 0, y: 3.5, z: 3.01, rotY: Math.PI },
-            // 左面 (X-)
-            { x: -3.01, y: 2, z: -1.5, rotY: Math.PI/2 },
-            { x: -3.01, y: 2, z: 1.5, rotY: Math.PI/2 },
-            { x: -3.01, y: 3.5, z: 0, rotY: Math.PI/2 },
-            // 右面 (X+)
-            { x: 3.01, y: 2, z: -1.5, rotY: -Math.PI/2 },
-            { x: 3.01, y: 2, z: 1.5, rotY: -Math.PI/2 },
-            { x: 3.01, y: 3.5, z: 0, rotY: -Math.PI/2 }
-        ];
-
-        windowConfigs.forEach(config => {
-            // 窗戶框架
-            const windowGeometry = new THREE.PlaneGeometry(0.6, 0.8);
-            const windowMaterial = new THREE.MeshLambertMaterial({ 
-                color: 0xffff88,
-                transparent: true,
-                opacity: 0.8,
-                side: THREE.DoubleSide,
-                emissive: 0x000000 // MeshLambertMaterial 支援 emissive
-            });
-            
-            const windowMesh = new THREE.Mesh(windowGeometry, windowMaterial);
-            
-            windowMesh.position.set(
-                worldPos.x + config.x, 
-                config.y, 
-                worldPos.z + config.z
-            );
-            windowMesh.rotation.y = config.rotY;
-            
-            group.add(windowMesh);
-            this.windows.push(windowMesh);
+    windowQuads() {
+        const q = [];
+        // 主堡下層
+        [[0.7, 0], [-0.7, 0]].forEach(([x]) => {
+            q.push({ w: 0.5, h: 0.75, x, y: 1.9, z: 1.43, ry: 0 }, { w: 0.5, h: 0.75, x, y: 1.9, z: -1.43, ry: Math.PI });
+            q.push({ w: 0.5, h: 0.75, x: 1.43, y: 1.9, z: x, ry: Math.PI / 2 }, { w: 0.5, h: 0.75, x: -1.43, y: 1.9, z: x, ry: -Math.PI / 2 });
         });
-    }
-
-    // 更新窗戶光照（由光照系統調用）
-    updateWindowLighting(isNight, lightIntensity) {
-        if (this.windows) {
-            this.windows.forEach(window => {
-                if (window.material) {
-                    if (isNight) {
-                        window.material.opacity = 1.0;
-                        window.material.color.setHex(0xffcc00);
-                        window.material.emissive.setHex(0x664400); // 添加自發光
-                    } else {
-                        window.material.opacity = 0.4;
-                        window.material.color.setHex(0x88ccff);
-                        window.material.emissive.setHex(0x000000); // 移除自發光
-                    }
-                }
-            });
+        // 主堡上層（升級後多幾排）
+        const rows = this.level === 2 ? [4.0, 5.9, 7.8, 9.6] : (this.level === 1 ? [4.0, 5.6] : [4.0]);
+        for (const y of rows) {
+            q.push({ w: 0.5, h: 0.7, x: 0, y, z: 1.23, ry: 0 }, { w: 0.5, h: 0.7, x: 0, y, z: -1.23, ry: Math.PI });
+            q.push({ w: 0.5, h: 0.7, x: 1.23, y, z: 0, ry: Math.PI / 2 }, { w: 0.5, h: 0.7, x: -1.23, y, z: 0, ry: -Math.PI / 2 });
         }
+        // 角塔箭窗（朝外）
+        [[-2.55, -2.55], [2.55, -2.55], [-2.55, 2.55], [2.55, 2.55]].forEach(([x, z]) => {
+            const sx = Math.sign(x), sz = Math.sign(z);
+            q.push({ w: 0.2, h: 0.7, x: x + sx * 0.72, y: 2.6, z: z + sz * 0.72, ry: Math.atan2(sx, sz) });
+        });
+        // 城門內燈火
+        q.push({ w: 0.5, h: 0.8, x: 0, y: 1.0, z: 3.1, ry: 0 });
+        return q;
     }
 
-    // 獲取特定建造部件的建造位置
-    getPartBuildPosition(partIndex) {
-        const centerX = this.x + 3; // 城堡中心X
-        const centerY = this.y + 3; // 城堡中心Y
-        
-        // 根據建造步驟返回不同的建造位置，所有部件都在地面層（z=0）
-        switch(partIndex) {
-            case 0: // 第1層：底部石頭色立方體
-                return { x: centerX, y: centerY, z: 0 }; // 地面層
-                
-            case 1: // 第2層：中層石頭色立方體
-                return { x: centerX, y: centerY, z: 0 }; // 地面層
-                
-            case 2: // 第3層：頂層石頭色立方體
-                return { x: centerX, y: centerY, z: 0 }; // 地面層
-                
-            case 3: // 第4層：四個角落的塔樓底部 (第1個塔樓)
-                return { x: this.x + 1, y: this.y + 1, z: 0 }; // 地面層
-                
-            case 4: // 第4層：四個角落的塔樓底部 (第2個塔樓)
-                return { x: this.x + 5, y: this.y + 1, z: 0 }; // 地面層
-                
-            case 5: // 第4層：四個角落的塔樓底部 (第3個塔樓)
-                return { x: this.x + 1, y: this.y + 5, z: 0 }; // 地面層
-                
-            case 6: // 第4層：四個角落的塔樓底部 (第4個塔樓)
-                return { x: this.x + 5, y: this.y + 5, z: 0 }; // 地面層
-                
-            case 7: // 第5層：四個角落的塔樓頂部 (第1個)
-                return { x: this.x + 1, y: this.y + 1, z: 0 }; // 地面層
-                
-            case 8: // 第5層：四個角落的塔樓頂部 (第2個)
-                return { x: this.x + 5, y: this.y + 1, z: 0 }; // 地面層
-                
-            case 9: // 第5層：四個角落的塔樓頂部 (第3個)
-                return { x: this.x + 1, y: this.y + 5, z: 0 }; // 地面層
-                
-            case 10: // 第5層：四個角落的塔樓頂部 (第4個)
-                return { x: this.x + 5, y: this.y + 5, z: 0 }; // 地面層
-                
-            case 11: // 第6層：主屋頂
-                return { x: centerX, y: centerY, z: 0 }; // 地面層
-                
-            case 12: // 第7層：塔樓屋頂 (第1個)
-                return { x: this.x + 1, y: this.y + 1, z: 0 }; // 地面層
-                
-            case 13: // 第7層：塔樓屋頂 (第2個)
-                return { x: this.x + 5, y: this.y + 1, z: 0 }; // 地面層
-                
-            case 14: // 第7層：塔樓屋頂 (第3個)
-                return { x: this.x + 1, y: this.y + 5, z: 0 }; // 地面層
-                
-            case 15: // 第7層：塔樓屋頂 (第4個)
-                return { x: this.x + 5, y: this.y + 5, z: 0 }; // 地面層
-                
-            default:
-                return { x: centerX, y: centerY, z: 0 };
-        }
-    }
-
-    // 檢查是否可以生產村民（只有建造完成才能生產）
-    canSpawnVillager() {
-        return this.isComplete; // 只有建造完成才能生產村民
-    }
-
-    // 生產村民（只有建造完成才能生產）
-    spawnVillager() {
-        if (!this.isComplete) {
-            return false; // 建造未完成，無法生產村民
-        }
-        return true; // 建造完成，可以生產村民
-    }
-
-    // 獲取實際人口支援（只有建造完成才提供）
-    getPopulationSupport() {
-        return this.isComplete ? this.populationSupport : 0;
-    }
+    getPopulationSupport() { return this.isComplete ? this.populationSupport : 0; }
+    canSpawnVillager() { return this.isComplete; }
+    spawnVillager() { return this.isComplete; }
+    updateWindowLighting() {}
 }
 
-// 塔樓類別
+// ---------- 塔樓 ----------
 class Tower extends Building {
     constructor(x, y, grid, scene, factionColor = 0xff0000) {
         super(x, y, grid, scene);
         this.width = 2;
         this.height = 2;
         this.factionColor = factionColor;
-        this.type = 'tower'; // 添加建築類型
-        
-        // 塔樓只需要1個工人
+        this.type = 'tower';
         this.requiredWorkers = 1;
         this.maxWorkers = 1;
-        
+        this.glowSize = 6;
         this.create();
     }
 
     create() {
-        const group = new THREE.Group();
-        const worldPos = this.getWorldPosition();
-
-        // 創建建築部分但不顯示
-        this.createBuildingParts(group, worldPos);
-        
-        this.mesh = group;
-        this.scene.add(group);
-
-        // 在網格中標記佔用
+        this.facing = Math.random() * Math.PI * 2;
+        this.makeGroup();
+        this.createSite();
+        this.createBuildingParts();
         this.grid.occupyArea(this.x, this.y, this.width, this.height, this.id);
     }
 
-    createBuildingParts(group, worldPos) {
-        this.buildingParts = [];
-
-        // 第1層：塔樓底部
-        const towerBottom1Geometry = new THREE.CylinderGeometry(1, 1, 3, 12);
-        const towerBottom1Material = new THREE.MeshLambertMaterial({ color: 0xa6a6a6 });
-        const towerBottom1Mesh = new THREE.Mesh(towerBottom1Geometry, towerBottom1Material);
-        towerBottom1Mesh.position.set(worldPos.x, -1.45, worldPos.z); // 稍微抬高避免Z-fighting
-        towerBottom1Mesh.castShadow = true;
-        towerBottom1Mesh.receiveShadow = true;
-        towerBottom1Mesh.visible = false;
-        group.add(towerBottom1Mesh);
-        this.buildingParts.push(towerBottom1Mesh);
-
-        // 第2層：塔樓中部
-        const towerMiddle1Geometry = new THREE.CylinderGeometry(1, 1, 3, 12);
-        const towerMiddle1Material = new THREE.MeshLambertMaterial({ color: 0xa6a6a6 });
-        const towerMiddle1Mesh = new THREE.Mesh(towerMiddle1Geometry, towerMiddle1Material);
-        towerMiddle1Mesh.position.set(worldPos.x, 1.5, worldPos.z);
-        towerMiddle1Mesh.castShadow = true;
-        towerMiddle1Mesh.receiveShadow = true;
-        towerMiddle1Mesh.visible = false;
-        group.add(towerMiddle1Mesh);
-        this.buildingParts.push(towerMiddle1Mesh);
-
-        // 第3層：塔樓頂部
-        const towerTop1Geometry = new THREE.CylinderGeometry(1, 1, 3, 12);
-        const towerTop1Material = new THREE.MeshLambertMaterial({ color: 0xa6a6a6 });
-        const towerTop1Mesh = new THREE.Mesh(towerTop1Geometry, towerTop1Material);
-        towerTop1Mesh.position.set(worldPos.x, 4.5, worldPos.z);
-        towerTop1Mesh.castShadow = true;
-        towerTop1Mesh.receiveShadow = true;
-        towerTop1Mesh.visible = false;
-        group.add(towerTop1Mesh);
-        this.buildingParts.push(towerTop1Mesh);
-
-        // 第4層：紅色圓錐屋頂
-        const roofGeometry = new THREE.ConeGeometry(1.5, 2, 12);
-        const roofMaterial = new THREE.MeshLambertMaterial({ color: 0xff0000 });
-        const roofMesh = new THREE.Mesh(roofGeometry, roofMaterial);
-        roofMesh.position.set(worldPos.x, 7, worldPos.z);
-        roofMesh.castShadow = true;
-        roofMesh.visible = false;
-        group.add(roofMesh);
-        this.buildingParts.push(roofMesh);
-
+    createBuildingParts() {
+        const G = Geo, stone = 0xaaa498, stoneD = 0x8e887b, roof = 0x3d63a0;
+        this.buildingParts = []; this.partAnchors = [];
+        this.addPart([G.cyl(1.2, 1.3, 0.7, 12, stoneD, { y: 0.35 }), G.cyl(1.0, 1.1, 0.5, 12, stone, { y: 0.95 })], 0, { x: 1.5, z: 0 });
+        this.addPart([G.cyl(0.9, 1.0, 2.4, 12, stone, { y: 0.7 + 1.2 })], 0.7, { x: -1.5, z: 0 });
+        {
+            const p = [G.cyl(0.85, 0.9, 2.2, 12, stone, { y: 3.1 + 1.1 }), G.cyl(1.15, 1.0, 0.4, 12, stoneD, { y: 5.3 + 0.2 })];
+            for (let i = 0; i < 8; i++) { const a = i / 8 * Math.PI * 2; p.push(G.box(0.38, 0.4, 0.38, stoneD, { x: Math.cos(a) * 1.08, z: Math.sin(a) * 1.08, y: 5.7 + 0.2, ry: -a })); }
+            this.addPart(p, 3.1, { x: 0, z: 1.5 });
+        }
+        {
+            const cloth = [G.part(new THREE.PlaneGeometry(0.9, 0.55, 6, 2), 0xe0b13a, { x: 0.48, y: 8.35 + 1.05 - 0.4, jitter: 0 })];
+            const solid = [G.cone(1.3, 2.7, 12, roof, { y: 6.1 + 1.35 }), G.cyl(0.04, 0.04, 1.4, 5, 0x4a3a2a, { y: 8.8 + 0.7 - 0.0 })];
+            const g = new THREE.Group();
+            const m1 = new THREE.Mesh(Geo.merge(solid), BM.get().solid); m1.castShadow = true;
+            const m2 = new THREE.Mesh(Geo.merge(cloth), BM.get().cloth); m2.castShadow = true;
+            g.add(m1, m2);
+            g.position.y = 6.1;
+            m1.position.y = -6.1; m2.position.y = -6.1;
+            g.visible = false;
+            this.group.add(g);
+            this.buildingParts.push(g); this.partAnchors.push({ x: 0, z: -1.5 });
+        }
         this.totalBuildSteps = this.buildingParts.length;
-        this.lastBuildTime = 0; // 塔樓修復：從0開始
-
-        // 稍後添加窗戶（建造完成後）
-        this.windowsCreated = false;
+        this.lastBuildTime = 0;
     }
 
-    onConstructionComplete() {
-        super.onConstructionComplete();
-        
-        // 建造完成後添加窗戶
-        if (!this.windowsCreated) {
-            this.createTowerWindows(this.mesh, this.getWorldPosition());
-            this.windowsCreated = true;
+    windowQuads() {
+        const q = [];
+        for (let i = 0; i < 4; i++) {
+            const a = i * Math.PI / 2 + 0.4;
+            const r = 0.93;
+            q.push({ w: 0.2, h: 0.65, x: Math.sin(a) * r, y: 2.2, z: Math.cos(a) * r, ry: a });
+            q.push({ w: 0.26, h: 0.7, x: Math.sin(a) * 0.88, y: 4.4, z: Math.cos(a) * 0.88, ry: a });
         }
+        return q;
     }
 
-    // 創建塔樓窗戶
-    createTowerWindows(group, worldPos) {
-        this.windows = [];
-        
-        // 在圓柱頂部創建4個窗戶（東南西北方向）
-        const windowAngles = [0, Math.PI/2, Math.PI, 3*Math.PI/2];
-        const radius = 1.01; // 稍微超出圓柱表面
-        
-        windowAngles.forEach(angle => {
-            const x = Math.cos(angle) * radius;
-            const z = Math.sin(angle) * radius;
-            
-            // 窗戶
-            const windowGeometry = new THREE.PlaneGeometry(0.4, 0.6);
-            const windowMaterial = new THREE.MeshLambertMaterial({
-                color: 0xffff88,
-                transparent: true,
-                opacity: 0.8,
-                side: THREE.DoubleSide,
-                emissive: 0x000000 // MeshLambertMaterial 支援 emissive
-            });
-            
-            const windowMesh = new THREE.Mesh(windowGeometry, windowMaterial);
-            
-            windowMesh.position.set(
-                worldPos.x + x,
-                4.5, // 調整塔樓窗戶高度
-                worldPos.z + z
-            );
-            windowMesh.lookAt(worldPos.x, 4.5, worldPos.z); // 朝向塔樓中心
-            
-            group.add(windowMesh);
-            this.windows.push(windowMesh);
-        });
-    }
-
-    // 更新窗戶光照
-    updateWindowLighting(isNight, lightIntensity) {
-        if (this.windows) {
-            this.windows.forEach(window => {
-                if (window.material) {
-                    if (isNight) {
-                        window.material.opacity = 1.0;
-                        window.material.color.setHex(0xffcc00);
-                        window.material.emissive.setHex(0x664400); // 添加自發光
-                    } else {
-                        window.material.opacity = 0.4;
-                        window.material.color.setHex(0x88ccff);
-                        window.material.emissive.setHex(0x000000); // 移除自發光
-                    }
-                }
-            });
-        }
-    }
-
-    // 獲取特定建造部件的建造位置
-    getPartBuildPosition(partIndex) {
-        const centerX = this.x + 1; // 塔樓中心X
-        const centerY = this.y + 1; // 塔樓中心Y
-        
-        // 根據建造步驟返回不同的建造位置，所有部件都在地面層（z=0）
-        switch(partIndex) {
-            case 0: // 第1層：塔樓底部
-                return { x: centerX, y: centerY, z: 0 }; // 地面層
-                
-            case 1: // 第2層：塔樓中部
-                return { x: centerX, y: centerY, z: 0 }; // 地面層
-                
-            case 2: // 第3層：塔樓頂部
-                return { x: centerX, y: centerY, z: 0 }; // 地面層
-                
-            case 3: // 第4層：紅色圓錐屋頂
-                return { x: centerX, y: centerY, z: 0 }; // 地面層
-                
-            default:
-                return { x: centerX, y: centerY, z: 0 };
-        }
-    }
+    updateWindowLighting() {}
 }
 
-// 房舍類別
+// ---------- 房舍 ----------
 class House extends Building {
-    constructor(x, y, grid, scene) {
+    // tier 0 = 茅草小屋（郊區）、1 = 木構房（市區）、2 = 石造樓房（城堡周邊）
+    constructor(x, y, grid, scene, tier = 1) {
         super(x, y, grid, scene);
         this.width = 4;
         this.height = 4;
-        this.populationSupport = 5; // 支援5人口
-        this.type = 'house'; // 添加建築類型
-        
-        // 房舍只需要1個工人
+        this.tier = tier;
+        this.populationSupport = House.POP[tier];
+        this.type = 'house';
         this.requiredWorkers = 1;
         this.maxWorkers = 1;
-        
+        this.glowSize = [6.5, 7.5, 8.2][tier];
         this.create();
     }
 
-    // 獲取實際人口支援（只有建造完成才提供）
-    getPopulationSupport() {
-        return this.isComplete ? this.populationSupport : 0;
+    getPopulationSupport() { return this.isComplete ? this.populationSupport : 0; }
+
+    // 原地升級：換成更高級的外觀（以彈出動畫長出新模型）
+    upgrade(tier) {
+        if (!this.group || tier === this.tier) return;
+        for (const m of this.buildingParts) { this.group.remove(m); m.traverse && m.traverse(o => { if (o.geometry) o.geometry.dispose(); }); }
+        if (this.windows) { this.group.remove(this.windows); this.windows.geometry.dispose(); this.windows = null; }
+        this.popping = [];
+        this.tier = tier;
+        this.populationSupport = House.POP[tier];
+        this.glowSize = [6.5, 7.5, 8.2][tier];
+        if (this.glowMesh) this.glowMesh.scale.set(this.glowSize, 1, this.glowSize);
+        this.createBuildingParts();
+        this.currentBuildStep = this.totalBuildSteps;
+        for (const m of this.buildingParts) {
+            m.visible = true; m.scale.set(0.9, 0.02, 0.9); m.userData.pop = -Math.random() * 0.3;
+            this.popping.push(m);
+        }
+        this.buildWindows();
+        const fx = window.worldInstance && window.worldInstance.fx;
+        if (fx) { const c = this.getCenterWorld(); fx.dust(c.x, 0.2, c.z, 12); fx.sparkle(c.x, 2.5, c.z); }
+    }
+
+    setFacing(angle) {
+        // 吸附到最近的 90 度，使大門朝向指定方向（+z 為門）
+        this.facing = Math.round(angle / (Math.PI / 2)) * (Math.PI / 2);
+        if (this.group) this.group.rotation.y = this.facing;
     }
 
     create() {
-        const group = new THREE.Group();
-        const worldPos = this.getWorldPosition();
-
-        // 創建建築部分但不顯示
-        this.createBuildingParts(group, worldPos);
-        
-        this.mesh = group;
-        this.scene.add(group);
-
-        // 在網格中標記佔用
+        this.makeGroup();
+        this.createSite();
+        this.createBuildingParts();
         this.grid.occupyArea(this.x, this.y, this.width, this.height, this.id);
     }
 
-    createBuildingParts(group, worldPos) {
-        this.buildingParts = [];
+    createBuildingParts() {
+        if (this.tier === 0) return this.partsCottage();
+        if (this.tier === 2) return this.partsStone();
+        return this.partsTimber();
+    }
 
-        // 第1層：底部灰色立方體基礎
-        const baseGeometry = new THREE.BoxGeometry(4, 1.5, 4);
-        const baseMaterial = new THREE.MeshLambertMaterial({ color: 0x808080 });
-        const baseMesh = new THREE.Mesh(baseGeometry, baseMaterial);
-        baseMesh.position.set(worldPos.x, -0.8, worldPos.z); // 調整位置避免Z-fighting
-        baseMesh.castShadow = true;
-        baseMesh.receiveShadow = true;
-        baseMesh.visible = false;
-        group.add(baseMesh);
-        this.buildingParts.push(baseMesh);
-
-        // 第2層：木頭色立方體主體
-        const middleGeometry = new THREE.BoxGeometry(4, 2, 4);
-        const middleMaterial = new THREE.MeshLambertMaterial({ color: 0xF0E68C });
-        const middleMesh = new THREE.Mesh(middleGeometry, middleMaterial);
-        middleMesh.position.set(worldPos.x, 1.25, worldPos.z);
-        middleMesh.castShadow = true;
-        middleMesh.receiveShadow = true;
-        middleMesh.visible = false;
-        group.add(middleMesh);
-        this.buildingParts.push(middleMesh);
-
-        // 第3層：木頭色正三角柱屋頂
-        const roofShape = new THREE.Shape();
-        roofShape.moveTo(-2, 0);
-        roofShape.lineTo(2, 0);
-        roofShape.lineTo(0, 1.73);
-        roofShape.lineTo(-2, 0);
-        
-        const extrudeSettings = {
-            depth: 4,
-            bevelEnabled: false
-        };
-        
-        const roofGeometry = new THREE.ExtrudeGeometry(roofShape, extrudeSettings);
-        const roofMaterial = new THREE.MeshLambertMaterial({ color: 0x654321 });
-        const roofMesh = new THREE.Mesh(roofGeometry, roofMaterial);
-        roofMesh.position.set(worldPos.x, 2.25, worldPos.z - 2);
-        roofMesh.castShadow = true;
-        roofMesh.receiveShadow = true;
-        roofMesh.visible = false;
-        group.add(roofMesh);
-        this.buildingParts.push(roofMesh);
-
+    partsCottage() {
+        const G = Geo;
+        const wall = Util.pick([0xd8c49a, 0xcdb88f, 0xc2ab80, 0xb89c72]);
+        const straw = Util.pick([0xc9a65a, 0xbf9b52, 0xd0b068]);
+        const wood = 0x6a4a2c;
+        this.buildingParts = []; this.partAnchors = [];
+        this.addPart([G.box(3.0, 0.3, 3.2, 0x8d8a82, { y: 0.15 })], 0, { x: 0, z: 2.2 });
+        {
+            const p = [G.box(2.6, 1.5, 2.8, wall, { y: 0.3 + 0.75 })];
+            for (const sx of [-1, 1]) for (const sz of [-1, 1]) p.push(G.box(0.16, 1.55, 0.16, wood, { x: sx * 1.3, z: sz * 1.4, y: 0.3 + 0.77 }));
+            p.push(G.box(2.7, 0.1, 2.9, wood, { y: 1.8 }));
+            p.push(G.box(0.65, 1.15, 0.1, 0x5a3a22, { y: 0.3 + 0.58, z: 1.43 }));
+            p.push(G.box(0.5, 0.6, 0.08, wood, { x: -0.8, y: 1.15, z: 1.42 }));
+            p.push(G.box(0.5, 0.6, 0.08, wood, { x: 1.31, y: 1.15, z: 0, ry: Math.PI / 2 }));
+            p.push(G.box(0.7, 0.1, 0.35, 0x6a4a2c, { x: 1.0, y: 0.5, z: 1.55 }), G.blob(0.18, 0, 0xc9a23a, { x: 1.0, y: 0.7, z: 1.55, sx: 1.6 }));
+            this.addPart(p, 0.3, { x: -2.0, z: 0 });
+        }
+        {
+            const p = [G.gable(3.5, 1.35, 3.5, straw, wall, { y: 1.85 })];
+            p.push(G.box(0.14, 0.12, 3.6, 0x8b6f3a, { y: 1.85 + 1.35 }));
+            p.push(G.box(0.4, 1.2, 0.4, 0x8a7f74, { x: -0.8, y: 1.85 + 1.15, z: -0.7 }));
+            this.addPart(p, 1.85, { x: 2.0, z: 0 });
+        }
+        this.smokeEmitters = [{ x: -0.8, y: 3.4, z: -0.7 }];
         this.totalBuildSteps = this.buildingParts.length;
-        this.lastBuildTime = 0; // 房舍修復：從0開始
-
-        // 稍後添加窗戶（建造完成後）
-        this.windowsCreated = false;
+        this.lastBuildTime = 0;
     }
 
-    onConstructionComplete() {
-        super.onConstructionComplete();
-        
-        // 建造完成後添加窗戶
-        if (!this.windowsCreated) {
-            this.createHouseWindows(this.mesh, this.getWorldPosition());
-            this.windowsCreated = true;
+    // 高木屋：三層木構架樓房（逐層微微外挑），紅磚煙囪、陡峭屋頂
+    partsStone() {
+        const G = Geo;
+        const plaster = Util.pick([0xf0e6cf, 0xe8dcc0, 0xeee2c8]);
+        const roof = Util.pick([0xa83a2c, 0x7a3b2e, 0x8c4a32, 0x5e4a3a]);
+        const beam = 0x4a3222, brick = 0x9a5a48, wood = 0x6e5236;
+        this.buildingParts = []; this.partAnchors = [];
+        this.roofColor = roof;
+        const floor = (w, h, y, withDoor) => {
+            const p = [G.box(w, h, w, plaster, { y: y + h / 2 }), G.box(w + 0.12, 0.16, w + 0.12, beam, { y }), G.box(w + 0.12, 0.16, w + 0.12, beam, { y: y + h })];
+            const e = w / 2 + 0.01;
+            for (const sx of [-1, 0, 1]) for (const sz of [-1, 1]) p.push(G.box(0.16, h, 0.16, beam, { x: sx * (w / 2 - 0.02), z: sz * (w / 2 - 0.02), y: y + h / 2 }));
+            for (const sz of [-1, 1]) for (const sx of [-1, 1]) p.push(G.box(0.16, h, 0.16, beam, { x: sx * (w / 2 - 0.02), z: sz * 0.0, y: y + h / 2 }));
+            // 斜撐
+            for (const sx of [-1, 1]) p.push(G.box(0.12, h * 1.08, 0.1, beam, { x: sx * w * 0.25, z: e, y: y + h / 2, rz: sx * 0.7 }));
+            if (withDoor) p.push(G.box(0.95, 1.4, 0.14, 0x4e3220, { y: y + 0.72, z: e + 0.02 }), G.box(1.2, 0.16, 0.22, beam, { y: y + 1.5, z: e + 0.02 }));
+            return p;
+        };
+        this.addPart([G.box(3.5, 0.45, 3.5, wood, { y: 0.225 }), G.box(1.3, 0.2, 0.8, 0x6a5a48, { y: 0.1, z: 2.0 })], 0, { x: 0, z: 2.5 });
+        this.addPart(floor(3.2, 1.7, 0.45, true), 0.45, { x: -2.4, z: 0 });
+        this.addPart(floor(3.45, 1.65, 2.15, false), 2.15, { x: 2.4, z: 0 });
+        this.addPart(floor(3.3, 1.55, 3.8, false), 3.8, { x: -2.4, z: 1 });
+        {
+            const y0 = 5.35;
+            const p = [G.gable(4.0, 2.4, 3.9, roof, plaster, { y: y0 }), G.box(0.16, 0.12, 4.05, 0x3d2a1c, { y: y0 + 2.4 })];
+            p.push(G.box(0.5, 2.0, 0.5, brick, { x: 1.0, y: y0 + 1.6, z: -0.9 }), G.box(0.68, 0.12, 0.68, 0x7a4a3a, { x: 1.0, y: y0 + 2.65, z: -0.9 }));
+            // 屋簷下的小閣樓窗
+            p.push(G.box(0.8, 0.7, 0.5, plaster, { y: y0 + 0.75, z: 1.35 }), G.gable(1.0, 0.55, 0.7, roof, plaster, { y: y0 + 1.1, z: 1.35 }));
+            this.addPart(p, y0, { x: 0, z: -2.5 });
         }
+        this.smokeEmitters = [{ x: 1.0, y: 8.2, z: -0.9 }];
+        this.totalBuildSteps = this.buildingParts.length;
+        this.lastBuildTime = 0;
     }
 
-    // 創建房舍窗戶
-    createHouseWindows(group, worldPos) {
-        this.windows = [];
-        
-        // 四面牆的窗戶位置
-        const windowConfigs = [
-            // 前面 (Z-)
-            { x: -1, y: 2, z: -2.01, rotY: 0 },
-            { x: 1, y: 2, z: -2.01, rotY: 0 },
-            // 後面 (Z+)
-            { x: -1, y: 2, z: 2.01, rotY: Math.PI },
-            { x: 1, y: 2, z: 2.01, rotY: Math.PI },
-            // 左面 (X-)
-            { x: -2.01, y: 2, z: -1, rotY: Math.PI/2 },
-            { x: -2.01, y: 2, z: 1, rotY: Math.PI/2 },
-            // 右面 (X+)
-            { x: 2.01, y: 2, z: -1, rotY: -Math.PI/2 },
-            { x: 2.01, y: 2, z: 1, rotY: -Math.PI/2 }
-        ];
+    partsTimber() {
+        const G = Geo;
+        const plaster = Util.pick([0xeadfc6, 0xe4d3ae, 0xd9cdb8, 0xefe6d2, 0xe0c9a6]);
+        const roof = Util.pick([0xb5442f, 0x944030, 0x5c7391, 0x7a5f45, 0x6f8a55]);
+        const beam = 0x5a3d28;
+        this.buildingParts = []; this.partAnchors = [];
+        this.roofColor = roof;
 
-        windowConfigs.forEach(config => {
-            // 窗戶
-            const windowGeometry = new THREE.PlaneGeometry(0.5, 0.6);
-            const windowMaterial = new THREE.MeshLambertMaterial({ 
-                color: 0xffff88,
-                transparent: true,
-                opacity: 0.8,
-                side: THREE.DoubleSide,
-                emissive: 0x000000 // MeshLambertMaterial 支援 emissive
+        this.addPart([G.box(3.5, 0.5, 3.5, 0x8d8a82, { y: 0.25 }), G.box(1.2, 0.18, 0.7, 0x77746d, { y: 0.09, z: 1.95 })], 0, { x: 0, z: 2.4 });
+
+        {
+            const p = [G.box(3.1, 1.9, 3.1, plaster, { y: 0.5 + 0.95 })];
+            for (const sx of [-1, 1]) for (const sz of [-1, 1]) p.push(G.box(0.2, 1.95, 0.2, beam, { x: sx * 1.55, z: sz * 1.55, y: 0.5 + 0.97 }));
+            p.push(G.box(3.2, 0.13, 3.2, beam, { y: 1.55 }));
+            p.push(G.box(3.2, 0.13, 3.2, beam, { y: 2.3 }));
+            // 門與窗框
+            p.push(G.box(0.8, 1.35, 0.12, 0x5a3a22, { y: 0.5 + 0.68, z: 1.56 }));
+            p.push(G.box(0.95, 0.12, 0.16, beam, { y: 0.5 + 1.38, z: 1.56 }));
+            const frame = (x, y, z, ry) => p.push(G.box(0.7, 0.85, 0.1, beam, { x, y, z, ry: ry || 0 }));
+            frame(-1.0, 1.55, 1.56); frame(1.0, 1.55, 1.56);
+            frame(0, 1.55, -1.56, Math.PI);
+            frame(1.56, 1.55, 0, Math.PI / 2); frame(-1.56, 1.55, 0, Math.PI / 2);
+            // 窗台花箱
+            p.push(G.box(0.6, 0.14, 0.2, 0x6a4a2c, { x: -1.0, y: 1.05, z: 1.66 }), G.blob(0.22, 0, 0x5aa04a, { x: -1.0, y: 1.2, z: 1.66, sx: 1.6, sy: 0.7 }));
+            this.addPart(p, 0.5, { x: -2.3, z: 0 });
+        }
+        {
+            const p = [G.gable(3.9, 1.7, 3.8, roof, plaster, { y: 2.4 })];
+            p.push(G.box(0.16, 0.12, 3.9, 0x3d2a1c, { y: 2.4 + 1.7 }));
+            p.push(G.box(0.45, 1.5, 0.45, 0x8a7f74, { x: 0.85, y: 2.4 + 1.5, z: -0.7 }), G.box(0.6, 0.12, 0.6, 0x6e655c, { x: 0.85, y: 2.4 + 2.28, z: -0.7 }));
+            this.addPart(p, 2.4, { x: 2.3, z: 0 });
+        }
+        this.smokeEmitters = [{ x: 0.85, y: 4.8, z: -0.7 }];
+        this.totalBuildSteps = this.buildingParts.length;
+        this.lastBuildTime = 0;
+    }
+
+    windowQuads() {
+        const q = [];
+        if (this.tier === 0) {
+            q.push({ w: 0.38, h: 0.48, x: -0.8, y: 1.15, z: 1.48, ry: 0 }, { w: 0.38, h: 0.48, x: 1.36, y: 1.15, z: 0, ry: Math.PI / 2 }, { w: 0.38, h: 0.48, x: 0, y: 1.15, z: -1.46, ry: Math.PI });
+            return q;
+        }
+        if (this.tier === 2) {
+            const rows = [[0.45, 3.2, 1.7], [2.15, 3.45, 1.65], [3.8, 3.3, 1.55]];   // [底, 寬, 高]
+            rows.forEach(([y0, w, h], r) => {
+                const e = w / 2 + 0.03, wy = y0 + h * 0.58;
+                const xs = r === 0 ? [-1.0, 1.0] : [-1.0, 0, 1.0];
+                for (const x of xs) q.push({ w: 0.46, h: 0.6, x, y: wy, z: e, ry: 0 });
+                q.push({ w: 0.46, h: 0.6, x: -0.7, y: wy, z: -e, ry: Math.PI }, { w: 0.46, h: 0.6, x: 0.7, y: wy, z: -e, ry: Math.PI });
+                q.push({ w: 0.46, h: 0.6, x: e, y: wy, z: 0.0, ry: Math.PI / 2 }, { w: 0.46, h: 0.6, x: -e, y: wy, z: 0.0, ry: -Math.PI / 2 });
             });
-            
-            const windowMesh = new THREE.Mesh(windowGeometry, windowMaterial);
-            
-            windowMesh.position.set(
-                worldPos.x + config.x, 
-                config.y, 
-                worldPos.z + config.z
-            );
-            windowMesh.rotation.y = config.rotY;
-            
-            group.add(windowMesh);
-            this.windows.push(windowMesh);
-        });
+            q.push({ w: 0.34, h: 0.4, x: 0, y: 6.4, z: 1.62, ry: 0 });
+            return q;
+        }
+        q.push({ w: 0.46, h: 0.62, x: -1.0, y: 1.55, z: 1.62, ry: 0 }, { w: 0.46, h: 0.62, x: 1.0, y: 1.55, z: 1.62, ry: 0 });
+        q.push({ w: 0.46, h: 0.62, x: 0, y: 1.55, z: -1.62, ry: Math.PI });
+        q.push({ w: 0.46, h: 0.62, x: 1.62, y: 1.55, z: 0, ry: Math.PI / 2 }, { w: 0.46, h: 0.62, x: -1.62, y: 1.55, z: 0, ry: -Math.PI / 2 });
+        q.push({ w: 0.5, h: 0.5, x: 0, y: 3.15, z: 1.93, ry: 0 });   // 閣樓圓窗
+        return q;
     }
 
-    // 更新窗戶光照
-    updateWindowLighting(isNight, lightIntensity) {
-        if (this.windows) {
-            this.windows.forEach(window => {
-                if (window.material) {
-                    if (isNight) {
-                        window.material.opacity = 1.0;
-                        window.material.color.setHex(0xffcc00);
-                        window.material.emissive.setHex(0x664400); // 添加自發光
-                    } else {
-                        window.material.opacity = 0.4;
-                        window.material.color.setHex(0x88ccff);
-                        window.material.emissive.setHex(0x000000); // 移除自發光
-                    }
-                }
-            });
-        }
-    }
+    updateWindowLighting() {}
+}
+House.POP = [4, 5, 7];
 
-    // 獲取特定建造部件的建造位置
-    getPartBuildPosition(partIndex) {
-        const centerX = this.x + 2; // 房舍中心X
-        const centerY = this.y + 2; // 房舍中心Y
-        
-        // 根據建造步驟返回不同的建造位置，所有部件都在地面層（z=0）
-        switch(partIndex) {
-            case 0: // 第1層：底部灰色立方體基礎
-                return { x: centerX, y: centerY, z: 0 }; // 地面層
-                
-            case 1: // 第2層：木頭色立方體主體
-                return { x: centerX, y: centerY, z: 0 }; // 地面層
-                
-            case 2: // 第3層：木頭色正三角柱屋頂
-                return { x: centerX, y: centerY, z: 0 }; // 地面層
-                
-            default:
-                return { x: centerX, y: centerY, z: 0 };
-        }
+// ---------- 水車磨坊（只會蓋在河邊，水車朝向河面） ----------
+class Mill extends Building {
+    constructor(x, y, grid, scene, facing) {
+        super(x, y, grid, scene);
+        this.width = 5; this.height = 5;
+        this.type = 'mill';
+        this.requiredWorkers = 1;
+        this.maxWorkers = 2;
+        this.buildStepInterval = 1100;
+        this.glowSize = 6;
+        this.waterFacing = facing || 0;
+        this.create();
     }
+    create() {
+        this.facing = this.waterFacing;
+        this.makeGroup();
+        this.createSite();
+        this.createBuildingParts();
+        this.grid.occupyArea(this.x, this.y, this.width, this.height, this.id);
+    }
+    createBuildingParts() {
+        const G = Geo, wood = 0x7a5a38, plaster = 0xe8dcc0, roof = 0x7a3b2e, stone = 0x9a9486;
+        this.buildingParts = []; this.partAnchors = [];
+        this.addPart([G.box(4.6, 0.5, 4.6, stone, { y: 0.25 }), G.box(1.6, 0.12, 2.4, 0x6a4a2c, { x: 2.9, y: 0.12 })], 0, { x: -2.6, z: 0 });
+        {
+            const p = [G.box(3.0, 2.5, 3.2, plaster, { x: -0.4, y: 0.5 + 1.25 }), G.box(3.15, 0.16, 3.35, wood, { x: -0.4, y: 0.52 }), G.box(3.15, 0.16, 3.35, wood, { x: -0.4, y: 3.0 })];
+            for (const sx of [-1, 1]) for (const sz of [-1, 1]) p.push(G.box(0.16, 2.5, 0.16, wood, { x: -0.4 + sx * 1.5, z: sz * 1.6, y: 1.75 }));
+            p.push(G.box(0.8, 1.3, 0.12, 0x4e3220, { x: -0.4, y: 1.15, z: 1.62 }));
+            this.addPart(p, 0.5, { x: 0, z: 2.6 });
+        }
+        this.addPart([G.gable(3.7, 1.8, 3.9, roof, plaster, { x: -0.4, y: 3.05, ry: Math.PI / 2 }), G.box(0.5, 1.4, 0.5, 0x9a5a48, { x: -1.1, y: 3.05 + 1.2, z: -0.8 })], 3.0, { x: 0, z: -2.6 });
+        // 水車（獨立可旋轉的零件）：輪軸沿局部 x 軸，位於 +x 側（面向河）
+        {
+            const parts = [G.cyl(0.18, 0.18, 0.9, 8, wood, { rz: Math.PI / 2 })];
+            for (let k = 0; k < 4; k++) parts.push(G.box(0.1, 2.7, 0.1, wood, { rx: k * Math.PI / 4 }));
+            for (let k = 0; k < 10; k++) {
+                const a = k / 10 * Math.PI * 2;
+                parts.push(G.box(0.55, 0.62, 0.1, 0x8a6a42, { y: Math.cos(a) * 1.4, z: Math.sin(a) * 1.4, rx: a }));
+            }
+            const g = new THREE.Group(), mesh = new THREE.Mesh(Geo.merge(parts), BM.get().solid);
+            mesh.castShadow = true; g.add(mesh);
+            g.position.set(1.75, 1.35, 0); g.visible = false;
+            this.group.add(g);
+            this.wheel = mesh;
+            this.buildingParts.push(g); this.partAnchors.push({ x: 2.6, z: 0 });
+        }
+        this.smokeEmitters = [{ x: -1.1, y: 5.0, z: -0.8 }];
+        this.totalBuildSteps = this.buildingParts.length;
+        this.lastBuildTime = 0;
+    }
+    windowQuads() { return [{ w: 0.5, h: 0.6, x: -1.2, y: 1.7, z: 1.66, ry: 0 }, { w: 0.5, h: 0.6, x: 0.4, y: 1.7, z: 1.66, ry: 0 }]; }
+    spin(dt) { if (this.wheel && this.isComplete) this.wheel.rotation.x += dt * 0.7; }
 }
 
-// 農田類別
+// ---------- 農田 ----------
 class Farm extends Building {
-    constructor(x, y, grid, scene) {
+    constructor(x, y, grid, scene, suburb = false) {
         super(x, y, grid, scene);
+        this.suburb = suburb;
         this.width = 6;
         this.height = 6;
-        this.exhaustion = 50; // 枯竭程度，50滿，0完全枯竭
+        this.exhaustion = 50;
         this.maxExhaustion = 50;
-        this.type = 'farm'; // 添加建築類型
-        // 農田視覺屬性（不再產生食物，僅作視覺效果）
+        this.lifeSeconds = 85;     // 從種下到成熟收成的時間（遊戲秒，只計白天）
+        this.type = 'farm';
         this.workingVillager = null;
-        this.lastUpdate = Date.now();
-        this.harvestPoints = []; // 存儲采集點
-        
-        // 農田只需要1個工人
+        this.lastUpdate = simNow();
+        this.harvestPoints = [];
         this.requiredWorkers = 1;
         this.maxWorkers = 1;
-        
         this.generateHarvestPoints();
         this.create();
     }
 
     generateHarvestPoints() {
-        // 在6x6農田內生成多個采集點
         this.harvestPoints = [];
-        for (let i = 0; i < 12; i++) { // 12個采集點，適合6x6農田
-            this.harvestPoints.push({
-                x: (Math.random() - 0.5) * 5.5, // -2.75 到 +2.75 範圍內 (6x6的90%)
-                z: (Math.random() - 0.5) * 5.5
-            });
-        }
+        for (let i = 0; i < 12; i++) this.harvestPoints.push({ x: (Math.random() - 0.5) * 5.0, z: (Math.random() - 0.5) * 5.0 });
     }
 
     getRandomHarvestPoint() {
-        // 返回農田內的隨機采集點世界座標
-        const worldPos = this.getWorldPosition();
-        const point = this.harvestPoints[Math.floor(Math.random() * this.harvestPoints.length)];
-        return {
-            x: worldPos.x + point.x,
-            z: worldPos.z + point.z
-        };
+        const c = this.getCenterWorld();
+        const p = this.harvestPoints[Math.floor(Math.random() * this.harvestPoints.length)];
+        return { x: c.x + p.x, z: c.z + p.z };
     }
 
     create() {
-        const worldPos = this.getWorldPosition();
-        // 創建農田位置
-        
-        // 創建建築部分但不顯示（農田比較簡單，只有一個主要部分）
-        this.createBuildingParts(worldPos);
-        
-        // 同時保留地形著色系統
-        this.colorTerrainForFarm(worldPos);
-        
-        // 農田創建完成
-
-        // 在網格中標記佔用
+        this.facing = Math.floor(Math.random() * 2) * Math.PI / 2;
+        this.makeGroup();
+        this.createBuildingParts();
         this.grid.occupyArea(this.x, this.y, this.width, this.height, this.id);
     }
 
-    createBuildingParts(worldPos) {
-        this.buildingParts = [];
-
-        // 農田只有一個部分：彩色方塊
-        const farmGeometry = new THREE.BoxGeometry(6, 0.2, 6);
-        const farmMaterial = new THREE.MeshLambertMaterial({ 
-            color: 0x00ff00, // 明亮的綠色
-            transparent: true,
-            opacity: 0.8
-        });
-        
-        this.mesh = new THREE.Mesh(farmGeometry, farmMaterial);
-        this.mesh.position.set(worldPos.x, 0.1, worldPos.z); // 稍微高於地面
-        this.mesh.castShadow = true;
-        this.mesh.receiveShadow = true;
-        this.mesh.visible = false; // 開始時不可見
-        this.scene.add(this.mesh);
-        
-        this.buildingParts.push(this.mesh);
-        this.totalBuildSteps = this.buildingParts.length;
-        this.lastBuildTime = 0; // 農田修復：從0開始
-    }
-
-    // 修改地形顏色來表示農田
-    colorTerrainForFarm(worldPos) {
-        // 需要訪問地形網格來修改顏色
-        // 這需要從world.js獲取地形網格的引用
-        // 農田區域地形著色
-        
-        // 暫時存儲農田位置，稍後會由world.js統一處理
-        if (!window.farmAreas) {
-            window.farmAreas = [];
+    createBuildingParts() {
+        const G = Geo;
+        this.buildingParts = []; this.partAnchors = [];
+        const base = [G.box(5.7, 0.14, 5.7, 0x5b4330, { y: 0.07, jitter: 0.03 })];
+        // 田壟
+        for (let i = 0; i < 6; i++) base.push(G.box(5.2, 0.13, 0.46, 0x4a3524, { y: 0.17, z: -2.2 + i * 0.88, jitter: 0.06 }));
+        // 木欄與角柱
+        const rail = (w, d, x, z) => base.push(G.box(w, 0.1, d, 0x7a5a3a, { x, z, y: 0.35 }));
+        rail(5.9, 0.08, 0, -2.9); rail(5.9, 0.08, 0, 2.9); rail(0.08, 5.9, -2.9, 0); rail(0.08, 5.9, 2.9, 0);
+        for (const sx of [-1, 1]) for (const sz of [-1, 1]) base.push(G.box(0.14, 0.55, 0.14, 0x6a4a2c, { x: sx * 2.9, z: sz * 2.9, y: 0.28 }));
+        // 稻草人
+        base.push(G.cyl(0.05, 0.05, 1.5, 5, 0x6a4a2c, { x: 2.0, z: 2.0, y: 0.75 }), G.box(1.0, 0.07, 0.07, 0x6a4a2c, { x: 2.0, z: 2.0, y: 1.2 }));
+        base.push(G.blob(0.17, 0, 0xe6cf8a, { x: 2.0, z: 2.0, y: 1.6 }), G.cone(0.28, 0.26, 8, 0x8a5a2a, { x: 2.0, z: 2.0, y: 1.85 }));
+        // 郊區農田：乾草堆與小穀倉
+        if (this.suburb) {
+            for (const [hx, hz, hs] of [[-2.1, 2.1, 1], [-1.4, 2.3, 0.75]]) base.push(G.cone(0.5 * hs, 1.0 * hs, 7, 0xd9b95c, { x: hx, z: hz, y: 0.5 * hs }), G.cyl(0.5 * hs, 0.5 * hs, 0.2, 7, 0xc9a84c, { x: hx, z: hz, y: 0.1 }));
+            base.push(G.box(1.1, 0.8, 0.9, 0x8a5a3a, { x: -2.0, z: -2.3, y: 0.45 }), G.gable(1.4, 0.5, 1.2, 0x6a4a35, 0x8a5a3a, { x: -2.0, z: -2.3, y: 0.85 }));
         }
-        
-        window.farmAreas.push({
-            x: worldPos.x,
-            z: worldPos.z,
-            size: 6,
-            color: this.getCurrentFarmColor(),
-            exhaustion: this.exhaustion,
-            id: this.id
-        });
-        
-        // 農田區域已添加
-        // 農田顏色設定完成
+        // 作物
+        const crops = [];
+        for (let r = 0; r < 6; r++) for (let k = 0; k < 9; k++) {
+            crops.push(G.blob(0.26, 0, 0xffffff, { x: -2.3 + k * 0.575 + Util.rand(-0.06, 0.06), z: -2.2 + r * 0.88 + Util.rand(-0.06, 0.06), y: 0.38, sy: Util.rand(1.1, 1.6), jitter: 0.12 }, 0.18));
+        }
+        const group = new THREE.Group();
+        const baseMesh = new THREE.Mesh(Geo.merge(base), BM.get().solid);
+        baseMesh.castShadow = true; baseMesh.receiveShadow = true;
+        this.cropMat = new THREE.MeshLambertMaterial({ vertexColors: true, color: Util.color(0x5fae3f) });
+        const cropMesh = new THREE.Mesh(Geo.merge(crops), this.cropMat);
+        cropMesh.castShadow = true; cropMesh.receiveShadow = true;
+        group.add(baseMesh, cropMesh);
+        this.cropMesh = cropMesh;
+        group.visible = false;
+        this.group.add(group);
+        this.buildingParts.push(group);
+        this.partAnchors.push({ x: 0, z: 3.5 });
+        this.totalBuildSteps = 1;
+        this.lastBuildTime = 0;
+        this.updateFarmColor();
     }
 
-    // 獲取當前農田顏色
+    // 農田成熟度（作物顏色由綠到金黃，並逐漸長高）
     getCurrentFarmColor() {
-        const greenRatio = this.exhaustion / this.maxExhaustion;
-        
-        let red, green, blue;
-        if (greenRatio > 0.5) {
-            red = 50 + (100 - 50) * (1 - greenRatio);
-            green = 200 + (50 - 200) * (1 - greenRatio);
-            blue = 50 + (50 - 50) * (1 - greenRatio);
-        } else {
-            red = 100 + (194 - 100) * (1 - greenRatio * 2);
-            green = 200 + (164 - 200) * (1 - greenRatio * 2);
-            blue = 50 + (96 - 50) * (1 - greenRatio * 2);
-        }
-        
-        return { r: red / 255, g: green / 255, b: blue / 255 };
+        const ratio = this.exhaustion / this.maxExhaustion;     // 1 = 剛種下
+        const a = Util.color(0x5fae3f), b = Util.color(0xd8b548);
+        return a.lerp(b, 1 - ratio);
     }
 
-    // 讓農田貼合地形
-    conformToTerrain() {
-        const geometry = this.mesh.geometry;
-        const vertices = geometry.attributes.position.array;
-        
-        // 遍歷每個頂點，根據位置調整高度
-        for (let i = 0; i < vertices.length; i += 3) {
-            const x = vertices[i] + this.mesh.position.x;
-            const z = vertices[i + 2] + this.mesh.position.z;
-            
-            // 使用簡單的噪聲函數模擬地形高度，並添加小的偏移
-            const height = this.getTerrainHeight(x, z);
-            vertices[i + 1] = height * 0.1 + 0.05; // 縮放高度變化並添加0.05的偏移
-        }
-        
-        geometry.attributes.position.needsUpdate = true;
-        geometry.computeVertexNormals(); // 重新計算法線
-    }
-
-    // 獲取地形高度（簡化版噪聲函數）
-    getTerrainHeight(x, z) {
-        return Math.sin(x * 0.1) * Math.cos(z * 0.1) * 0.5 + 
-               Math.sin(x * 0.05) * Math.cos(z * 0.05) * 0.3;
+    updateFarmColor() {
+        if (!this.cropMat) return;
+        const ripe = 1 - this.exhaustion / this.maxExhaustion;
+        this.cropMat.color.copy(this.getCurrentFarmColor());
+        if (this.cropMesh) this.cropMesh.scale.y = 0.45 + 0.75 * Math.min(1, ripe * 1.4);
     }
 
     update(isNight = false) {
-        const currentTime = Date.now();
-        const deltaTime = currentTime - this.lastUpdate;
-        
-        // 每秒枯竭1點，但在夜晚時暫停枯竭
-        if (deltaTime >= 1000 && !isNight) {
-            this.exhaustion = Math.max(0, this.exhaustion - 1);
-            this.updateFarmColor(); // 更新地形顏色
-            this.lastUpdate = currentTime;
-            
-            // 檢查是否完全荒蕪
-            if (this.exhaustion <= 0) {
-                this.markForDestruction();
+        const now = simNow();
+        const dt = (now - this.lastUpdate) / 1000;
+        if (dt < 1) return;
+        this.lastUpdate = now;
+        if (!this.isComplete) return;           // 還沒蓋好的農田不會枯萎
+        if (isNight) return;
+        this.exhaustion = Math.max(0, this.exhaustion - dt * this.maxExhaustion / this.lifeSeconds);
+        this.updateFarmColor();
+        if (this.exhaustion <= 0) this.markForDestruction();
+    }
+
+    markForDestruction() { this.shouldDestroy = true; }
+    needsDestruction() { return this.shouldDestroy || false; }
+
+    setWorker(villager) {
+        if (this.workingVillager !== null) return false;
+        this.workingVillager = villager;
+        return true;
+    }
+    removeWorker() { if (this.workingVillager) this.workingVillager = null; }
+    hasWorker() { return this.workingVillager !== null; }
+    replant() { this.exhaustion = this.maxExhaustion; this.updateFarmColor(); }
+
+    onConstructionComplete() {
+        this.releaseAllWorkers();
+        this.lastUpdate = simNow();
+    }
+
+    destroy() {
+        if (this.cropMat) this.cropMat.dispose();
+        super.destroy();
+    }
+}
+
+// ---------- 建築管理器 ----------
+class BuildingManager {
+    constructor(grid, scene, treeManager = null) {
+        this.grid = grid;
+        this.scene = scene;
+        this.treeManager = treeManager;
+        this.buildings = new Map();
+        this.castles = [];
+        this.farms = [];
+        this.towers = [];
+        this.houses = [];
+        this.walls = [];
+        this.mills = [];
+        this.smokeTimer = 0;
+    }
+
+    setTreeManager(treeManager) { this.treeManager = treeManager; }
+
+    _wear(b, strength, margin) {
+        const w = window.worldInstance;
+        if (w && w.pathWear) w.pathWear.stampRect(b.x, b.y, b.width, b.height, strength, margin);
+    }
+
+    _register(b, list) {
+        this.buildings.set(b.id, b);
+        list.push(b);
+    }
+
+    buildCastle(x, y) {
+        if (!this.grid.canBuildIgnoreTrees(x, y, 6, 6)) return { success: false, message: '位置被佔用' };
+        if (!this.grid.checkBuildingSpacing(x, y, 6, 6, false)) return { success: false, message: '與其他建築距離太近' };
+        if (this.buildings.size > 0 && !this.grid.checkBuildingCondition(x, y, 6, 6)) return { success: false, message: '附近5格內需要有建築' };
+        if (this.treeManager) this.treeManager.clearTreesInArea(x + 3, y + 3, 9);
+        const castle = new Castle(x, y, this.grid, this.scene);
+        this._register(castle, this.castles);
+        this._wear(castle, 0.9, 2);
+        return { success: true, building: castle };
+    }
+
+    buildTower(x, y, factionColor = 0xff0000) {
+        if (!this.grid.canBuildIgnoreTrees(x, y, 2, 2)) return { success: false, message: '位置被佔用' };
+        if (!this.grid.checkBuildingSpacing(x, y, 2, 2, false)) return { success: false, message: '與其他建築距離太近' };
+        if (!this.grid.checkBuildingCondition(x, y, 2, 2)) return { success: false, message: '附近5格內需要有建築' };
+        if (this.treeManager) this.treeManager.clearTreesInArea(x + 1, y + 1, 4);
+        const tower = new Tower(x, y, this.grid, this.scene, factionColor);
+        this._register(tower, this.towers);
+        this._wear(tower, 0.8, 1);
+        return { success: true, building: tower };
+    }
+
+    buildHouse(x, y) {
+        if (!this.grid.canBuildIgnoreTrees(x, y, 4, 4)) return { success: false, message: '位置被佔用' };
+        if (!this.grid.checkBuildingSpacing(x, y, 4, 4, false)) return { success: false, message: '與其他建築距離太近' };
+        if (!this.grid.checkBuildingCondition(x, y, 4, 4)) return { success: false, message: '附近5格內需要有建築' };
+        if (this.treeManager) this.treeManager.clearTreesInArea(x + 2, y + 2, 5);
+        const w0 = window.worldInstance;
+        const house = new House(x, y, this.grid, this.scene, 0);  // 新屋一律先蓋基礎屋，之後依 8:2 配額升級
+        // 大門朝向最近的城堡
+        let best = null, bd = Infinity;
+        for (const c of this.castles) {
+            const d = Math.hypot(c.x - x, c.y - y);
+            if (d < bd) { bd = d; best = c; }
+        }
+        if (best) {
+            const dx = (best.x + 3) - (x + 2), dz = (best.y + 3) - (y + 2);
+            house.setFacing(Math.atan2(dx, dz));
+        } else house.setFacing(Math.random() * 6.28);
+        this._register(house, this.houses);
+        this._wear(house, 0.75, 1);
+        return { success: true, building: house };
+    }
+
+    // 城牆段 / 角樓（由 WallPlanner 規劃）；位置被佔用時回傳 null
+    buildWall(spec) {
+        if (spec.kind === 'tower') { if (!this.grid.canBuildIgnoreTrees(spec.x, spec.y, 3, 3)) return null; }
+        else if (!this.grid.canOccupyCells(spec.cells)) return null;
+        const b = spec.kind === 'tower' ? new WallTower(spec.x, spec.y, this.grid, this.scene, !!spec.keep)
+            : new WallPiece(spec, this.grid, this.scene);
+        this._register(b, this.walls);
+        return b;
+    }
+
+    buildMill(x, y, facing) {
+        if (!this.grid.canBuildIgnoreTrees(x, y, 5, 5, true)) return { success: false, message: '位置被佔用' };
+        if (this.treeManager) this.treeManager.clearTreesInArea(x + 2.5, y + 2.5, 5);
+        const mill = new Mill(x, y, this.grid, this.scene, facing);
+        this._register(mill, this.mills);
+        this._wear(mill, 0.8, 1);
+        return { success: true, building: mill };
+    }
+
+    buildFarm(x, y) {
+        if (!this.grid.canBuildIgnoreTrees(x, y, 6, 6)) return { success: false, message: '位置被佔用' };
+        if (!this.grid.checkBuildingCondition(x, y, 6, 6)) return { success: false, message: '附近5格內需要有建築' };
+        if (this.treeManager) this.treeManager.clearTreesInArea(x + 3, y + 3, 7);
+        const w0 = window.worldInstance;
+        const farm = new Farm(x, y, this.grid, this.scene, !!(w0 && w0.districtDist(x + 3, y + 3) > 34));
+        this._register(farm, this.farms);
+        return { success: true, building: farm };
+    }
+
+    // 遊戲邏輯更新（currentTime = 遊戲毫秒）
+    update(currentTime, isNight = false) {
+        this.buildings.forEach(b => { if (b.isUnderConstruction) b.updateConstruction(currentTime); });
+        // 城市成熟 / 靠近城堡 → 房屋逐步升級（每次一棟）
+        if (!isNight && currentTime - (this.lastTierCheck || 0) > 5000) {
+            this.lastTierCheck = currentTime;
+            const w = window.worldInstance;
+            if (w) {
+                // 8:2 法則：全部房屋中「升級屋」至多 20%（高級石木屋至多約 7%），其餘維持基礎屋
+                const hs = this.houses.filter(h => h.isComplete && h.group);
+                const N = this.houses.length;
+                const capUp = Math.floor(N * 0.2), cap2 = Math.floor(N * 0.07);
+                let nUp = 0, n2 = 0;
+                for (const h of this.houses) { if (h.tier >= 1) nUp++; if (h.tier >= 2) n2++; }
+                hs.sort((a, b) => w.districtDist(a.x + 2, a.y + 2) - w.districtDist(b.x + 2, b.y + 2));
+                for (const h of hs) {
+                    const t = w.districtTier(h.x + 2, h.y + 2);
+                    if (t <= h.tier) continue;
+                    const nt = h.tier + 1;
+                    if (h.tier === 0 && nUp >= capUp) continue;
+                    if (nt === 2 && n2 >= cap2) continue;
+                    h.upgrade(nt); break;
+                }
             }
-        } else if (isNight && deltaTime >= 1000) {
-            // 夜晚時只更新時間戳記，不枯竭
-            this.lastUpdate = currentTime;
+            if (w) for (const c of this.castles) {
+                if (!c.isComplete || !c.group) continue;
+                if (w.castleLevel() > c.level) { c.upgrade(c.level + 1); break; }
+            }
+        }
+        for (let i = this.farms.length - 1; i >= 0; i--) {
+            const farm = this.farms[i];
+            farm.update(isNight);
+            if (farm.needsDestruction()) this.destroyFarm(farm);
         }
     }
 
-    // 標記農田需要被銷毀
-    markForDestruction() {
-        this.shouldDestroy = true;
-        // 農田已完全荒蕪，標記為待銷毀
-    }
-
-    // 檢查是否需要銷毀
-    needsDestruction() {
-        return this.shouldDestroy || false;
-    }
-
-    // 更新農田顏色（用於地形著色）
-    updateFarmColor() {
-        // 更新3D方塊的顏色
-        if (this.mesh && this.mesh.material) {
-            const farmColor = this.getCurrentFarmColor();
-            const hexColor = Math.floor(farmColor.r * 255) << 16 | Math.floor(farmColor.g * 255) << 8 | Math.floor(farmColor.b * 255);
-            this.mesh.material.color.setHex(hexColor);
-        }
-        
-        // 更新地形著色系統
-        if (window.farmAreas) {
-            const farmArea = window.farmAreas.find(area => area.id === this.id);
-            if (farmArea) {
-                farmArea.color = this.getCurrentFarmColor();
-                farmArea.exhaustion = this.exhaustion;
-                
-                // 通知world.js更新地形顏色
-                if (window.worldInstance && window.worldInstance.updateFarmColors) {
-                    window.worldInstance.updateFarmColors();
+    // 視覺動畫（真實秒）
+    animate(dt, state, fx) {
+        BM.time.value += dt;
+        this.buildings.forEach(b => b.animate(dt));
+        for (const m of this.mills) m.spin(dt);
+        // 煙囪冒煙（白天與夜晚都有，夜晚更多）
+        this.smokeTimer += dt;
+        if (fx && this.smokeTimer > 0.4) {
+            this.smokeTimer = 0;
+            for (const h of this.houses) {
+                if (!h.isComplete || !h.group) continue;
+                if (Math.random() < 0.55 + state.night * 0.35) {
+                    const e = h.smokeEmitters[0];
+                    const v = new THREE.Vector3(e.x, e.y, e.z);
+                    h.group.localToWorld(v);
+                    fx.smoke(v.x, v.y, v.z);
                 }
             }
         }
     }
 
-    // 設置工作的村民（帶原子性檢查）
-    setWorker(villager) {
-        if (this.workingVillager !== null) {
-            // 農田已經有工人，拒絕分配
-            return false; // 已經有工人了
-        }
-        this.workingVillager = villager;
-        // 農田成功分配工人
-        return true; // 成功分配
-    }
-
-    // 移除工作的村民
-    removeWorker() {
-        if (this.workingVillager) {
-            // 農田移除工人
-            this.workingVillager = null;
-        }
-    }
-
-    // 檢查是否有村民在工作
-    hasWorker() {
-        return this.workingVillager !== null;
-    }
-
-    // 重新種植（純視覺效果）
-    replant() {
-        this.exhaustion = this.maxExhaustion;
-        this.updateFarmColor(); // 更新地形顏色
-    }
-
-    // 重寫destroy方法以清理農田相關資源
-    destroy() {
-        // 調用父類的destroy方法
-        super.destroy();
-        
-        // 從地形著色系統中移除
-        if (window.farmAreas) {
-            window.farmAreas = window.farmAreas.filter(area => area.id !== this.id);
-            
-            // 通知world.js更新地形顏色
-            if (window.worldInstance && window.worldInstance.updateFarmColors) {
-                window.worldInstance.updateFarmColors();
-            }
-        }
-        
-        // 農田地形著色已清理
-    }
-
-    // 獲取特定建造部件的建造位置
-    getPartBuildPosition(partIndex) {
-        const centerX = this.x + 3; // 農田中心X
-        const centerY = this.y + 3; // 農田中心Y
-        
-        // 農田只有一個建造步驟
-        switch(partIndex) {
-            case 0: // 農田彩色方塊
-                return { x: centerX, y: centerY, z: 0 }; // 地面層
-                
-            default:
-                return { x: centerX, y: centerY, z: 0 };
-        }
-    }
-}
-
-// 建築管理器
-class BuildingManager {
-    constructor(grid, scene, treeManager = null) {
-        this.grid = grid;
-        this.scene = scene;
-        this.treeManager = treeManager; // 添加樹木管理器引用
-        this.buildings = new Map();
-        this.castles = [];
-        this.farms = [];
-        this.towers = [];
-        this.houses = []; // 新增房舍陣列
-    }
-    
-    // 設置樹木管理器引用
-    setTreeManager(treeManager) {
-        this.treeManager = treeManager;
-    }
-
-    // 更新建築狀態（主要處理農田荒蕪）
-    update(currentTime, isNight = false) {
-        // 更新所有建築的建造進度
-        for (const building of this.buildings.values()) {
-            if (building.updateConstruction) {
-                building.updateConstruction(currentTime);
-            }
-        }
-        
-        // 更新所有農田
-        for (let i = this.farms.length - 1; i >= 0; i--) {
-            const farm = this.farms[i];
-            farm.update(isNight);
-            
-            // 檢查農田是否需要銷毀
-            if (farm.needsDestruction()) {
-                this.destroyFarm(farm);
-            }
-        }
-    }
-
-    // 銷毀荒蕪的農田
     destroyFarm(farm) {
-        // 銷毀荒蕪農田
-        
         let needReassignment = false;
-        
-        // 如果有村民在此農田工作，讓他們回到idle狀態
         if (farm.workingVillager) {
-            farm.workingVillager.workingFarm = null;
-            farm.workingVillager.state = 'idle';
-            farm.workingVillager.target = null;
-            farm.workingVillager.path = [];
+            const v = farm.workingVillager;
+            v.workingFarm = null; v.state = 'idle'; v.target = null; v.path = [];
             needReassignment = true;
-            // 農田工人已被重新分配為閒置狀態
         }
-        
-        // 從場景中移除
-        if (farm.mesh) {
-            this.scene.remove(farm.mesh);
-        }
-        
-        // 從地形著色系統中移除
-        if (window.farmAreas) {
-            window.farmAreas = window.farmAreas.filter(area => area.id !== farm.id);
-            
-            // 通知world.js更新地形顏色
-            if (window.worldInstance && window.worldInstance.updateFarmColors) {
-                window.worldInstance.updateFarmColors();
-            }
-        }
-        
-        // 釋放網格佔用
+        const fx = window.worldInstance && window.worldInstance.fx;
+        if (fx && farm.group) { const c = farm.getCenterWorld(); fx.dust(c.x, 0.2, c.z, 12); }
+        farm.destroy();
         this.grid.freeArea(farm.x, farm.y, farm.width, farm.height);
-        
-        // 從管理器中移除
         this.buildings.delete(farm.id);
         this.farms = this.farms.filter(f => f.id !== farm.id);
-        
-        // 如果有村民被釋放且有其他可用農田，觸發重新分配
         if (needReassignment && window.worldInstance && window.worldInstance.villagerManager) {
-            // 檢查是否有其他農田需要工人
-            const availableFarms = this.farms.filter(f => !f.hasWorker());
-            if (availableFarms.length > 0) {
-                // 觸發村民重新分配到其他農田
-                window.worldInstance.villagerManager.reassignVillagersToFarms();
-            }
-        }
-        
-        // 農田已完全銷毀，資源已釋放
-    }
-
-    // 建造城堡
-    buildCastle(x, y) {
-        if (!this.grid.canBuild(x, y, 6, 6)) {
-            return { success: false, message: '位置被佔用' };
-        }
-
-        // 檢查建築間距（城堡不是農田，需要檢查間距）
-        if (!this.grid.checkBuildingSpacing(x, y, 6, 6, false)) {
-            return { success: false, message: '與其他建築距離太近，需要保持3格距離' };
-        }
-
-        // 對於城堡，如果已經有任何建築，則需要檢查條件
-        // 但如果沒有建築（第一個建築），則可以建造
-        if (this.buildings.size > 0 && !this.grid.checkBuildingCondition(x, y, 6, 6)) {
-            return { success: false, message: '附近5格內需要有建築' };
-        }
-
-        const castle = new Castle(x, y, this.grid, this.scene);
-        this.buildings.set(castle.id, castle);
-        this.castles.push(castle);
-        
-        // 清除城堡附近的樹木
-        if (this.treeManager) {
-            this.treeManager.clearTreesInArea(x + 3, y + 3, 10);
-        }
-        
-        // 城堡建造成功
-        return { success: true, building: castle };
-    }
-
-    // 建造塔樓
-    buildTower(x, y, factionColor = 0xff0000) {
-        if (!this.grid.canBuild(x, y, 2, 2)) {
-            return { success: false, message: '位置被佔用' };
-        }
-
-        // 檢查建築間距（塔樓不是農田，需要檢查間距）
-        if (!this.grid.checkBuildingSpacing(x, y, 2, 2, false)) {
-            return { success: false, message: '與其他建築距離太近，需要保持3格距離' };
-        }
-
-        if (!this.grid.checkBuildingCondition(x, y, 2, 2)) {
-            return { success: false, message: '附近5格內需要有建築' };
-        }
-
-        const tower = new Tower(x, y, this.grid, this.scene, factionColor);
-        this.buildings.set(tower.id, tower);
-        this.towers.push(tower);
-        
-        // 清除塔樓附近的樹木
-        if (this.treeManager) {
-            this.treeManager.clearTreesInArea(x, y, 4);
-        }
-        
-        // 塔樓建造成功
-        return { success: true, building: tower };
-    }
-
-    // 建造房舍
-    buildHouse(x, y) {
-        if (!this.grid.canBuild(x, y, 4, 4)) {
-            return { success: false, message: '位置被佔用' };
-        }
-
-        // 檢查建築間距（房舍不是農田，需要檢查間距）
-        if (!this.grid.checkBuildingSpacing(x, y, 4, 4, false)) {
-            return { success: false, message: '與其他建築距離太近，需要保持3格距離' };
-        }
-
-        if (!this.grid.checkBuildingCondition(x, y, 4, 4)) {
-            return { success: false, message: '附近5格內需要有建築' };
-        }
-
-        const house = new House(x, y, this.grid, this.scene);
-        this.buildings.set(house.id, house);
-        this.houses.push(house);
-        
-        // 清除房舍附近的樹木
-        if (this.treeManager) {
-            this.treeManager.clearTreesInArea(x, y, 5);
-        }
-        
-        // 房舍建造成功
-        return { success: true, building: house };
-    }
-
-    // 建造農田
-    buildFarm(x, y) {
-        if (!this.grid.canBuild(x, y, 6, 6)) {
-            return { success: false, message: '位置被佔用' };
-        }
-
-        if (!this.grid.checkBuildingCondition(x, y, 6, 6)) {
-            return { success: false, message: '附近5格內需要有建築' };
-        }
-
-        const farm = new Farm(x, y, this.grid, this.scene);
-        this.buildings.set(farm.id, farm);
-        this.farms.push(farm);
-        
-        // 清除農田附近的樹木
-        if (this.treeManager) {
-            this.treeManager.clearTreesInArea(x + 3, y + 3, 8);
-        }
-        
-        // 農田建造成功
-        
-        return { success: true, building: farm };
-    }
-
-    // 更新所有建築
-    update(currentTime, isNight = false) {
-        // 更新所有建築的建造進度
-        this.buildings.forEach(building => {
-            if (building.isUnderConstruction) {
-                building.updateConstruction(currentTime);
-            }
-        });
-
-        // 更新所有農田
-        for (let i = this.farms.length - 1; i >= 0; i--) {
-            const farm = this.farms[i];
-            farm.update(isNight);
-            
-            // 檢查農田是否需要銷毀
-            if (farm.needsDestruction()) {
-                this.destroyFarm(farm);
-            }
+            if (this.farms.some(f => !f.hasWorker())) window.worldInstance.villagerManager.reassignVillagersToFarms();
         }
     }
 
-    // 更新所有建築的窗戶光照
-    updateBuildingLighting(isNight, lightIntensity) {
-        // 更新城堡窗戶
-        this.castles.forEach(castle => {
-            if (castle.updateWindowLighting) {
-                castle.updateWindowLighting(isNight, lightIntensity);
-            }
-        });
-        
-        // 更新塔樓窗戶
-        this.towers.forEach(tower => {
-            if (tower.updateWindowLighting) {
-                tower.updateWindowLighting(isNight, lightIntensity);
-            }
-        });
-        
-        // 更新房舍窗戶
-        this.houses.forEach(house => {
-            if (house.updateWindowLighting) {
-                house.updateWindowLighting(isNight, lightIntensity);
-            }
-        });
-    }
+    // 夜晚程度 0..1 → 窗戶 / 光暈
+    updateBuildingLighting(isNight, nightIntensity) { BM.setNight(nightIntensity); }
 
-    // 獲取城堡數量
-    getCastleCount() {
-        return this.castles.length;
-    }
+    getCastleCount() { return this.castles.length; }
 
-    // 銷毀建築
     destroyBuilding(buildingId) {
         const building = this.buildings.get(buildingId);
         if (building) {
             building.destroy();
             this.buildings.delete(buildingId);
-            
-            // 從對應陣列中移除
             this.castles = this.castles.filter(b => b.id !== buildingId);
             this.farms = this.farms.filter(b => b.id !== buildingId);
             this.towers = this.towers.filter(b => b.id !== buildingId);
-            
-            // 釋放網格佔用
-            this.grid.freeArea(building.x, building.y, building.width, building.height);
+            this.houses = this.houses.filter(b => b.id !== buildingId);
+            this.walls = this.walls.filter(b => b.id !== buildingId);
+            this.mills = this.mills.filter(b => b.id !== buildingId);
+            if (building.isWall) this.grid.freeById(buildingId); else this.grid.freeArea(building.x, building.y, building.width, building.height);
         }
     }
 
-    // 獲取所有建築
-    getAllBuildings() {
-        return Array.from(this.buildings.values());
-    }
+    getAllBuildings() { return Array.from(this.buildings.values()); }
 
-    // 獲取建築數量統計
     getBuildingCounts() {
-        return {
-            castles: this.castles.length,
-            towers: this.towers.length,
-            houses: this.houses.length,
-            farms: this.farms.length,
-            total: this.buildings.size
-        };
+        return { castles: this.castles.length, towers: this.towers.length, houses: this.houses.length, farms: this.farms.length, walls: this.walls.length, mills: this.mills.length, total: this.buildings.size };
     }
 
-    // 獲取建築上限
     getBuildingLimits() {
         const counts = this.getBuildingCounts();
-        const limits = {
-            castle: 1 + Math.floor(counts.towers / 8), // 每8個塔樓+1城堡上限（初始為1）
-            tower: Math.floor(counts.houses / 3),       // 每3個房舍+1塔樓上限（初始為0）
-            house: Math.floor(counts.farms / 3),        // 每3個農田+1房舍上限（初始為0）
-            farm: Number.MAX_SAFE_INTEGER               // 農田無上限
+        return {
+            castle: 1 + Math.floor(counts.houses / 12),
+            tower: Math.floor(counts.houses / 3),
+            house: Number.MAX_SAFE_INTEGER,
+            farm: Number.MAX_SAFE_INTEGER
         };
-        
-        // 建築上限計算
-        return limits;
     }
 
-    // 獲取總人口支援（只計算已完成的建築）
     getTotalPopulationSupport() {
-        let totalSupport = 0;
-        
-        // 城堡支援人口（只有已完成的）
-        this.castles.forEach(castle => {
-            totalSupport += castle.getPopulationSupport ? castle.getPopulationSupport() : 0;
-        });
-        
-        // 房舍支援人口（只有已完成的）
-        this.houses.forEach(house => {
-            totalSupport += house.getPopulationSupport ? house.getPopulationSupport() : 0;
-        });
-        
-        return Math.min(totalSupport, 200); // 人口上限200
+        let total = 0;
+        this.castles.forEach(c => { total += c.getPopulationSupport(); });
+        this.houses.forEach(h => { total += h.getPopulationSupport(); });
+        return Math.min(total, 200);
     }
 
-    // 獲取總人口上限（只計算已完成的建築）
-    getPopulationLimit() {
-        const castlePopulation = this.castles.reduce((sum, castle) => {
-            return sum + (castle.getPopulationSupport ? castle.getPopulationSupport() : 0);
-        }, 0);
-        
-        const housePopulation = this.houses.reduce((sum, house) => {
-            return sum + (house.getPopulationSupport ? house.getPopulationSupport() : 0);
-        }, 0);
-        
-        return Math.min(castlePopulation + housePopulation, 200); // 最大200人口
-    }
+    getPopulationLimit() { return this.getTotalPopulationSupport(); }
 
-    // 檢查是否可以建造特定類型的建築
     canBuildType(type) {
-        const counts = this.getBuildingCounts();
-        const limits = this.getBuildingLimits();
-        
-        switch(type) {
-            case 'castle':
-                return counts.castles < limits.castle;
-            case 'tower':
-                return counts.towers < limits.tower;
-            case 'house':
-                return counts.houses < limits.house;
-            case 'farm':
-                return true; // 農田無上限
-            default:
-                return false;
+        const counts = this.getBuildingCounts(), limits = this.getBuildingLimits();
+        switch (type) {
+            case 'castle': return counts.castles < limits.castle;
+            case 'tower': return counts.towers < limits.tower;
+            case 'house': return true;
+            case 'farm': return true;
+            default: return false;
         }
     }
 }

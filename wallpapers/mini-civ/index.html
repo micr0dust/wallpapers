@@ -1,448 +1,55 @@
 <!DOCTYPE html>
-<html lang="zh-TW">
+<html lang="zh-Hant">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>迷你世界 - Mini World</title>
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            overflow: hidden;
-            font-family: Arial, sans-serif;
-            background: #000;
-        }
-        
-        canvas {
-            display: block;
-            width: 100vw;
-            height: 100vh;
-        }
-        
-        .ui-overlay {
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            background: linear-gradient(135deg, rgba(0, 0, 0, 0.9), rgba(30, 30, 30, 0.8));
-            padding: 10px 20px;
-            font-size: 14px;
-            z-index: 100;
-            backdrop-filter: blur(5px);
-            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-        }
-        
-        .navbar {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 15px;
-        }
-        
-        .resource-section {
-            display: flex;
-            gap: 20px;
-            flex-wrap: wrap;
-        }
-        
-        .resource-item {
-            display: flex;
-            align-items: center;
-            gap: 5px;
-            font-size: 13px;
-            color: #fff;
-        }
-        
-        .resource-icon {
-            font-size: 16px;
-            width: 20px;
-            text-align: center;
-        }
-        
-        .control-section {
-            display: flex;
-            gap: 10px;
-            align-items: center;
-        }
-        
-        .control-button {
-            background: rgba(76, 175, 80, 0.8);
-            color: white;
-            border: none;
-            padding: 6px 10px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 12px;
-            display: flex;
-            align-items: center;
-            gap: 5px;
-            transition: all 0.3s ease;
-        }
-        
-        .control-button:hover {
-            background: rgba(69, 160, 73, 0.9);
-            transform: translateY(-1px);
-        }
-        
-        .control-button:disabled {
-            background: rgba(102, 102, 102, 0.5);
-            cursor: not-allowed;
-            transform: none;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mini Civ</title>
+<style>
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #0b1020; }
+  canvas#game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  /* 輕微暗角，讓畫面更有電影感 */
+  #vignette { position: fixed; inset: 0; pointer-events: none;
+    background: radial-gradient(ellipse at center, rgba(0,0,0,0) 62%, rgba(0,0,0,0.28) 100%); }
+  #fade { position: fixed; inset: 0; background: #0b1020; pointer-events: none; opacity: 1; transition: opacity 2.2s ease; }
+  #fade.gone { opacity: 0; }
+  #hud { display: none; position: fixed; left: 22px; bottom: 22px; padding: 12px 16px; border-radius: 12px;
+    background: rgba(12,18,32,0.42); color: #f2f5fb; font: 14px/1.55 "Segoe UI", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); pointer-events: none; min-width: 170px; text-shadow: 0 1px 2px rgba(0,0,0,.4); }
+  #hud .t { font-size: 16px; font-weight: 600; margin-bottom: 4px; }
+</style>
 </head>
 <body>
-    <canvas id="gameCanvas"></canvas>
-    
-    <div class="ui-overlay" style="display: none;">
-        <div class="navbar">
-            <div class="resource-section">
-                <div class="resource-item">
-                    <span class="resource-icon">🌲</span>
-                    <span id="wood-count">0</span>
-                </div>
-                <div class="resource-item">
-                    <span class="resource-icon">🏠</span>
-                    <span id="population">0</span>
-                </div>
-                <div class="resource-item">
-                    <span class="resource-icon">👷</span>
-                    <span id="villagers">0</span>
-                </div>
-                <div class="resource-item">
-                    <span class="resource-icon">👩‍🌾</span>
-                    <span id="farm-workers">0</span>
-                </div>
-                <div class="resource-item">
-                    <span class="resource-icon">🕐</span>
-                    <span id="time-display">12:00</span>
-                </div>
-            </div>
-            
-            <div class="control-section">
-                <button class="control-button" id="pause-btn">
-                    <span>⏸️</span>
-                    <span>暫停</span>
-                </button>
-            </div>
-        </div>
-    </div>
+<canvas id="game"></canvas>
+<div id="vignette"></div>
+<div id="hud"></div>
+<div id="fade"></div>
 
-    <!-- Three.js -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    
-    <!-- 配置管理器 -->
-    <script src="config.js"></script>
-    
-    <!-- 遊戲核心類別 -->
-    <script src="world.js"></script>
-    <script src="grid.js"></script>
-    <script src="camera-controller.js"></script>
-    <script src="buildings.js"></script>
-    <script src="villager.js"></script>
-    <script src="tree.js"></script>
-    <script src="game.js"></script>
-    
-    <!-- 主要遊戲啟動 -->
-    <script>
-        // 異步初始化遊戲
-        async function initGame() {
-            try {
-                // 環境檢測
-                const isWallpaperEngine = typeof window.wallpaperPropertyListener !== 'undefined' ||
-                                        window.location.protocol === 'wallpaper-engine:' ||
-                                        (window.location.protocol === 'file:' && !window.location.href.includes('localhost'));
-                const isBrowser = !isWallpaperEngine;
-                
-                console.log(`🚀 啟動模式: ${isWallpaperEngine ? 'Wallpaper Engine' : '網頁瀏覽器'}`);
-                console.log(`📍 URL: ${window.location.href}`);
-                console.log(`🔧 協議: ${window.location.protocol}`);
-                
-                // 初始化配置管理器（使用內建默認值）
-                if (!window.configManager.defaultValues) {
-                    window.configManager.defaultValues = {
-                        gameSpeed: 1.0,
-                        cameraHeight: 25,
-                        cameraRadius: 35,
-                        rotationSpeed: 0.002,
-                        fogEnabled: true,
-                        autoPlay: true
-                    };
-                    console.log('🔧 使用內建默認配置:', window.configManager.defaultValues);
-                }
-                
-                // 在網頁環境中嘗試載入 project.json
-                if (isBrowser) {
-                    try {
-                        console.log('� 網頁模式：嘗試從 project.json 讀取配置...');
-                        await window.configManager.loadConfig();
-                    } catch (error) {
-                        console.warn('⚠️ 網頁模式：project.json 載入失敗，使用內建默認值:', error.message);
-                    }
-                } else {
-                    console.log('🎯 Wallpaper Engine 模式：使用內建默認值');
-                }
-                
-                // 初始化遊戲
-                console.log('🎮 開始初始化遊戲...');
-                const game = new Game();
-                game.init();
-                
-                // 將 game 設為全域變數
-                window.game = game;
-                
-                console.log('✅ 遊戲初始化完成！');
-                
-                // 顯示當前配置
-                const config = window.configManager.getDefaults();
-                console.table(config);
-                
-            } catch (error) {
-                console.error('❌ 遊戲初始化失敗:', error);
-                
-                // 顯示詳細錯誤信息
-                console.error('錯誤堆疊:', error.stack);
-                
-                // 僅在非 Wallpaper Engine 環境顯示錯誤頁面
-                if (window.location.protocol !== 'file:' || window.location.href.includes('localhost')) {
-                    document.body.innerHTML = `
-                        <div style="color: white; text-align: center; padding: 50px; font-family: Arial; background: #1a1a1a; min-height: 100vh;">
-                            <h2>🚫 遊戲初始化失敗</h2>
-                            <p style="color: #ff6b6b; font-weight: bold;">錯誤: ${error.message}</p>
-                            <p>請檢查瀏覽器控制台獲取更多信息</p>
-                        </div>
-                    `;
-                }
-            }
-        }
-        
-        // 啟動遊戲
-        initGame();
-        
-        // Wallpaper Engine 屬性監聽器（在網頁模式下也會被調用以應用默認值）
-        window.wallpaperPropertyListener = {
-            applyUserProperties: function(properties) {
-                const isWallpaperEngine = typeof window.wallpaperPropertyListener !== 'undefined' && 
-                                        Object.keys(properties).some(key => properties[key].value !== undefined);
-                
-                if (isWallpaperEngine) {
-                    console.log('📡 接收到 Wallpaper Engine 屬性變更:', properties);
-                } else {
-                    console.log('🌐 網頁模式：應用來自 project.json 的默認屬性:', properties);
-                }
-                
-                const game = window.game;
-                if (!game) {
-                    console.warn('⚠️ 遊戲尚未初始化，稍後重試');
-                    return;
-                }
-                
-                // 遊戲速度
-                if (properties.gameSpeed) {
-                    const speed = properties.gameSpeed.value;
-                    if (game.world) {
-                        game.world.setGameSpeed(speed);
-                        console.log(`🏃 遊戲速度設為: ${speed}x（影響村民移動、建造等）`);
-                    }
-                }
-                
-                // 相機高度
-                if (properties.cameraHeight && game.world && game.world.cameraController) {
-                    const height = properties.cameraHeight.value;
-                    game.world.cameraController.height = height;
-                    console.log(`📸 相機高度設為: ${height}`);
-                }
-                
-                // 相機距離
-                if (properties.cameraRadius && game.world && game.world.cameraController) {
-                    const radius = properties.cameraRadius.value;
-                    game.world.cameraController.radius = radius;
-                    console.log(`🎯 相機距離設為: ${radius}`);
-                }
-                
-                // 旋轉速度
-                if (properties.rotationSpeed && game.world && game.world.cameraController) {
-                    const speed = properties.rotationSpeed.value;
-                    game.world.cameraController.rotationSpeed = speed;
-                    console.log(`🔄 旋轉速度設為: ${speed}`);
-                }
-                
-                // 霧效果
-                if (properties.fogEnabled !== undefined && game.world && game.world.cameraController) {
-                    const enabled = properties.fogEnabled.value;
-                    if (enabled) {
-                        game.world.cameraController.scene.fog = new THREE.FogExp2(0x87CEEB, 0.015);
-                    } else {
-                        game.world.cameraController.scene.fog = null;
-                    }
-                    console.log(`🌫️ 霧效果: ${enabled ? '啟用' : '停用'}`);
-                }
-                
-                // 自動遊戲（暫停/恢復）
-                if (properties.autoPlay !== undefined) {
-                    const autoPlay = properties.autoPlay.value;
-                    if (autoPlay) {
-                        game.resume();
-                    } else {
-                        game.pause();
-                    }
-                    console.log(`⏯️ 自動遊戲: ${autoPlay ? '啟用' : '停用'}`);
-                }
-            }
-        };
-        
-        // 應用默認屬性值（確保設定生效）
-        setTimeout(function() {
-            try {
-                const defaults = window.configManager.getDefaults();
-                window.wallpaperPropertyListener.applyUserProperties({
-                    gameSpeed: { value: defaults.gameSpeed },
-                    cameraHeight: { value: defaults.cameraHeight },
-                    cameraRadius: { value: defaults.cameraRadius },
-                    rotationSpeed: { value: defaults.rotationSpeed },
-                    fogEnabled: { value: defaults.fogEnabled },
-                    autoPlay: { value: defaults.autoPlay }
-                });
-                console.log('✅ 已應用來自 project.json 的默認配置:', defaults);
-            } catch (error) {
-                console.error('❌ 無法應用默認配置:', error);
-            }
-        }, 1500); // 延長等待時間確保配置已載入
-        
-        // 全局調試函數
-        window.debugVillagers = function() {
-            const game = window.game;
-            if (game && game.world) {
-                game.world.debugVillagers();
-            } else {
-                console.log('遊戲世界尚未初始化');
-            }
-        };
-        
-        // 強制修復停滯建築的函數
-        window.fixBuildings = function() {
-            const game = window.game;
-            if (game && game.world) {
-                const fixed = game.world.forceFixBuildings();
-                console.log(`修復操作完成，處理了 ${fixed} 個問題`);
-                return fixed;
-            } else {
-                console.log('遊戲世界尚未初始化');
-                return 0;
-            }
-        };
-
-        // 創建村民位置標記（發光線段）
-        window.debugMarkers = function() {
-            const game = window.game;
-            if (game && game.world) {
-                const count = game.world.debugCreateMarkers();
-                console.log(`創建了 ${count} 個村民位置標記`);
-                return count;
-            } else {
-                console.log('遊戲世界尚未初始化');
-                return 0;
-            }
-        };
-
-        // 移除村民位置標記
-        window.removeMarkers = function() {
-            const game = window.game;
-            if (game && game.world) {
-                game.world.debugRemoveMarkers();
-                console.log('已移除所有村民標記');
-            } else {
-                console.log('遊戲世界尚未初始化');
-            }
-        };
-
-        // 修復村民材質問題
-        window.fixMaterials = function() {
-            const game = window.game;
-            if (game && game.world) {
-                const fixed = game.world.debugFixMaterials();
-                console.log(`修復了 ${fixed} 個村民的材質問題`);
-                return fixed;
-            } else {
-                console.log('遊戲世界尚未初始化');
-                return 0;
-            }
-        };
-
-        // 重新創建問題村民
-        window.recreateVillagers = function() {
-            const game = window.game;
-            if (game && game.world) {
-                const recreated = game.world.debugRecreateVillagers();
-                console.log(`重新創建了 ${recreated} 個村民`);
-                return recreated;
-            } else {
-                console.log('遊戲世界尚未初始化');
-                return 0;
-            }
-        };
-
-        // 清理超界建築和修復被困村民
-        window.cleanupOutOfBounds = function() {
-            const game = window.game;
-            if (game && game.world) {
-                const result = game.world.debugCleanupOutOfBounds();
-                console.log(`清理完成 - 移除建築: ${result.removedBuildings}, 拯救工人: ${result.rescuedWorkers}`);
-                return result;
-            } else {
-                console.log('遊戲世界尚未初始化');
-                return { removedBuildings: 0, rescuedWorkers: 0 };
-            }
-        };
-
-        // 修復卡住的砍樹村民
-        window.fixStuckVillagers = function() {
-            const game = window.game;
-            if (game && game.world) {
-                const result = game.world.debugFixStuckTreeVillagers();
-                console.log(`已修復 ${result} 位卡住的砍樹村民`);
-                return result;
-            } else {
-                console.log('遊戲世界尚未初始化');
-                return 0;
-            }
-        };
-        
-        // 測試砍樹狀態
-        window.testTreeState = function() {
-            const game = window.game;
-            if (game && game.world && game.world.villagerManager) {
-                return game.world.villagerManager.debugTreeState();
-            } else {
-                console.log('遊戲未初始化');
-                return null;
-            }
-        };
-
-        // 執行全面修復
-        window.fixAll = function() {
-            const game = window.game;
-            if (game && game.world) {
-                return game.world.debugFixAll();
-            } else {
-                console.log('遊戲世界尚未初始化');
-                return null;
-            }
-        };
-        
-        // 在控制台提示調試命令
-        console.log('調試命令已載入:');
-        console.log('- debugVillagers() : 檢查村民和建築狀態');
-        console.log('- fixBuildings() : 強制修復停滯的建築');
-        console.log('- debugMarkers() : 創建村民位置標記（發光線段）');
-        console.log('- removeMarkers() : 移除村民位置標記');
-        console.log('- fixMaterials() : 修復村民材質問題');
-        console.log('- recreateVillagers() : 重新創建問題村民');
-        console.log('- cleanupOutOfBounds() : 清理超界建築並拯救被困村民');
-        console.log('- fixStuckVillagers() : 修復卡住的砍樹村民');
-        console.log('- testTreeState() : 查看砍樹村民詳細狀態');
-        console.log('- fixAll() : 執行全面修復（包含上述所有修復）');
-    </script>
+<script src="three.min.js"></script>
+<script src="config.js"></script>
+<script src="geo.js"></script>
+<script src="terrain.js"></script>
+<script src="grid.js"></script>
+<script src="tree.js"></script>
+<script src="effects.js"></script>
+<script src="sky.js"></script>
+<script src="buildings.js"></script>
+<script src="walls.js"></script>
+<script src="villager-rig.js"></script>
+<script src="villager.js"></script>
+<script src="camera-controller.js"></script>
+<script src="world.js"></script>
+<script src="game.js"></script>
+<script>
+  Config.applyQuery();
+  const game = new Game(document.getElementById('game'));
+  window.game = game;
+  try {
+    game.init();
+    game.start();
+  } catch (e) {
+    console.error('初始化失敗', e);
+    document.body.style.background = '#222';
+  }
+</script>
 </body>
 </html>
