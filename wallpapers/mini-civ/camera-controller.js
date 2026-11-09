@@ -18,15 +18,8 @@ class CameraController {
     }
 
     bindPointer() {
-        let down = false, lx = 0;
+        // 不提供滑鼠拖曳旋轉（桌面框選時會誤轉）；僅保留滾輪縮放
         const el = window;
-        el.addEventListener('pointerdown', e => { down = true; lx = e.clientX; });
-        el.addEventListener('pointerup', () => { down = false; });
-        el.addEventListener('pointermove', e => {
-            if (!down) return;
-            this.angle -= (e.clientX - lx) * 0.006; lx = e.clientX;
-            this.lastInteract = this.time;
-        });
         el.addEventListener('wheel', e => {
             this.userZoom = Util.clamp(this.userZoom * (1 + Math.sign(e.deltaY) * 0.08), 0.45, 2.2);
             this.lastInteract = this.time;
